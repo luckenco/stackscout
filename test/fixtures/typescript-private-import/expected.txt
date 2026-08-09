@@ -1,0 +1,7 @@
++ ts:dep.ts::new_step
+
+- ts:dep.ts::old_step
+
+~ ts:dep.ts::work
+-   ts:dep.ts::old_step
++   ts:dep.ts::new_step

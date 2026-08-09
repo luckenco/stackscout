@@ -1,0 +1,4 @@
+~ ts:api.ts::run
++   ts:api.ts::second
+    ts:api.ts::first
+-   ts:api.ts::second

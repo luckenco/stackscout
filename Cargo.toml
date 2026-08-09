@@ -1,0 +1,14 @@
+[package]
+name = "stackscout"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ignore = "0.4"
+similar = { version = "3.1", default-features = false, features = ["std"] }
+thiserror = "2"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+# TODO: Upgrade when https://github.com/tree-sitter/tree-sitter-typescript/issues/348
+# is fixed, then update the typescript-type-star-export regression fixture.
+tree-sitter-typescript = "0.23"

@@ -1,0 +1,4 @@
+  ts:main.ts::entry
+~   ts:a.ts::work
+-     ts:a.ts::oldA
++     ts:a.ts::newA

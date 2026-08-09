@@ -1,0 +1,1 @@
+~ rust:lib.rs::<Thing as First>::work

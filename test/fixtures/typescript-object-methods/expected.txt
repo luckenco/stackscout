@@ -1,0 +1,3 @@
+~ ts:main.ts::entry
+-   ts:main.ts::old_step
++   ts:main.ts::new_step

@@ -1,0 +1,7 @@
+  rust:lib.rs::tasks::run
+~   rust:lib.rs::tasks::work
+-     rust:lib.rs::tasks::old_step
++     rust:lib.rs::tasks::new_step
+~   rust:lib.rs::tasks::relative
+-     rust:lib.rs::tasks::old_relative
++     rust:lib.rs::tasks::new_relative

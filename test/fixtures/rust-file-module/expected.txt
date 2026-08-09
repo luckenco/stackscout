@@ -1,0 +1,5 @@
+  rust:src/lib.rs::entry
+    rust:src/tasks.rs::run
+~     rust:src/tasks.rs::work
+-       rust:src/tasks.rs::old_step
++       rust:src/tasks.rs::new_step

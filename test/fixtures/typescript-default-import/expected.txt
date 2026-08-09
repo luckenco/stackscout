@@ -1,0 +1,4 @@
+  ts:main.ts::run
+~   ts:dep.ts::work
+-     ts:dep.ts::oldStep
++     ts:dep.ts::newStep

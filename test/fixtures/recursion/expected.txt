@@ -1,0 +1,4 @@
+~ rust:lib.rs::repeat
+    rust:lib.rs::repeat [cycle]
+-   rust:lib.rs::old_step
++   rust:lib.rs::new_step

@@ -1,0 +1,4 @@
+  ts:api.ts::create
+~   ts:store.ts::save
++     ts:store.ts::audit
+      ts:store.ts::insert

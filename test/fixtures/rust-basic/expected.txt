@@ -1,0 +1,10 @@
+~ rust:lib.rs::Worker::execute
+-   rust:lib.rs::Worker::stable
++   rust:lib.rs::Worker::added
+    rust:lib.rs::Worker::open
+
+~ rust:lib.rs::run
+    rust:lib.rs::stable
+-   rust:lib.rs::removed
++   rust:lib.rs::added
+    rust:lib.rs::tools::helper
