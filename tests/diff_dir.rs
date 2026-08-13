@@ -1,13 +1,28 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn fixture_root(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test/fixtures")
+        .join(name)
+}
 
 fn fixture(name: &str) -> String {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("test/fixtures")
-        .join(name);
+    let root = fixture_root(name);
     let actual = stackscout::diff_dirs(root.join("before"), root.join("after")).unwrap();
-    let expected = fs::read_to_string(root.join("expected.txt")).unwrap();
-    assert_eq!(actual, expected);
+    assert_output(&root.join("expected.txt"), actual)
+}
+
+fn diagnostic_fixture(name: &str) -> String {
+    let root = fixture_root(name);
+    let actual =
+        stackscout::diff_dirs_with_diagnostics(root.join("before"), root.join("after")).unwrap();
+    assert_output(&root.join("expected-diagnostics.txt"), actual)
+}
+
+fn assert_output(expected: &Path, actual: String) -> String {
+    assert_eq!(actual, fs::read_to_string(expected).unwrap());
     actual
 }
 
@@ -35,6 +50,18 @@ fn recursive_calls_stop_at_a_cycle() {
 }
 
 #[test]
+fn independent_changed_cycles_each_have_a_root() {
+    let output = fixture("independent-root-cycles");
+    assert_eq!(output.matches("[cycle]").count(), 2);
+}
+
+#[test]
+fn independent_exported_cycles_each_show_the_changed_callee() {
+    let output = fixture("exported-root-cycles");
+    assert_eq!(output.matches("rust:lib.rs::changed").count(), 2);
+}
+
+#[test]
 fn reordered_calls_are_semantic_changes() {
     fixture("reordered");
 }
@@ -46,15 +73,30 @@ fn changed_callee_affects_unchanged_exported_caller() {
 }
 
 #[test]
-fn unresolved_and_ambiguous_calls_are_explicit() {
+fn ambiguous_calls_are_explicit() {
     let output = fixture("resolution");
-    assert!(output.contains("[unresolved: missing]"));
     assert!(output.contains("[ambiguous: choose"));
+}
+
+#[test]
+fn unresolved_changes_are_shown_without_unchanged_unresolved_noise() {
+    let output = fixture("unresolved-calls");
+    assert!(!output.contains("stableMissing"));
 }
 
 #[test]
 fn ambiguous_calls_show_which_possible_callee_changed() {
     fixture("ambiguous-impact");
+}
+
+#[test]
+fn every_affected_root_shows_its_changed_path() {
+    fixture("explanatory-root");
+}
+
+#[test]
+fn deep_changes_fall_back_to_the_changed_symbol() {
+    fixture("deep-change");
 }
 
 #[test]
@@ -163,6 +205,41 @@ fn closures_do_not_contribute_calls_to_their_parent() {
 fn malformed_files_are_reported_and_omitted_from_both_sides() {
     let output = fixture("malformed");
     assert!(!output.contains("ts:broken.ts::"));
+    assert!(!output.contains("bad-export.ts"));
+}
+
+#[test]
+fn unchanged_diagnostics_are_hidden_by_default() {
+    assert_eq!(fixture("unchanged-incomplete"), "");
+}
+
+#[test]
+fn diagnostics_are_detailed_only_when_requested() {
+    fixture("diagnostics");
+    diagnostic_fixture("diagnostics");
+    diagnostic_fixture("unchanged-incomplete");
+}
+
+#[test]
+fn diagnostics_flag_enables_detailed_output() {
+    let root = fixture_root("unchanged-incomplete");
+    let output = Command::new(env!("CARGO_BIN_EXE_stackscout"))
+        .args(["diff-dir", "--diagnostics"])
+        .arg(root.join("before"))
+        .arg(root.join("after"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        fs::read_to_string(root.join("expected-diagnostics.txt")).unwrap()
+    );
+}
+
+#[test]
+fn nested_private_changes_have_one_explanatory_root() {
+    let output = fixture("nested-private-change");
+    assert_eq!(output.matches("ts:main.ts::usage").count(), 1);
 }
 
 #[test]

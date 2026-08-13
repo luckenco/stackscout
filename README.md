@@ -5,7 +5,7 @@ changing.
 
 It is heavily inspired by
 [Dillon Mulroy's](https://x.com/dillon_mulroy/status/2069852516309762411?s=20) suggestion of asking
-your coding agenst for callstacks.
+your coding agents for call stacks.
 
 This works really well for me, since I've incorporated it in my workflow.
 
@@ -36,8 +36,11 @@ StackScout is currently a one-shot directory diff for Rust and TypeScript. It:
 - reports unresolved or ambiguous calls instead of guessing.
 
 ```sh
-stackscout diff-dir <before-directory> <after-directory>
+stackscout diff-dir [--diagnostics] <before-directory> <after-directory>
 ```
+
+The repo-local Pi extension snapshots supported source files at session start and exposes this diff
+through `call_graph_diff`.
 
 For example, adding an `audit` call inside `save` can produce:
 
@@ -56,16 +59,17 @@ StackScout is an early prototype. It does **not** currently:
 - update its graph incrementally when a file changes;
 - know about concurrent coding-agent sessions;
 - let one agent inspect another agent's live changes;
-- provide checkpoints, session-start diffs, or VCS revision lookup;
-- expose MCP, editor, or coding-agent integrations;
+- provide named checkpoints or VCS revision lookup;
+- expose MCP, editor, or coding-agent integrations beyond the bundled Pi extension;
 - avoid rescanning both directories on every run;
 - support languages other than Rust and TypeScript; or
 - provide compiler- or typechecker-complete call resolution.
 
 The graph is conservative and syntactic. Dynamic dispatch, reflection, Rust macro expansion,
 TypeScript type-driven method resolution, generated code, and calls outside the compared trees may
-remain unresolved. Parse failures are reported as incomplete rather than presented as trustworthy
-results.
+remain unresolved. Parse-failure transitions are reported as incomplete rather than presented as
+trustworthy results. Unchanged failures are hidden by default; `--diagnostics` includes their full
+details.
 
 ## License
 

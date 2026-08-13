@@ -16,10 +16,23 @@ fn main() -> ExitCode {
 }
 
 fn run(arguments: Vec<std::ffi::OsString>) -> Result<String, String> {
-    if arguments.len() != 3 || arguments[0] != "diff-dir" {
-        return Err("usage: stackscout diff-dir <before-directory> <after-directory>".to_owned());
-    }
-    let before = PathBuf::from(&arguments[1]);
-    let after = PathBuf::from(&arguments[2]);
-    stackscout::diff_dirs(before, after).map_err(|error| error.to_string())
+    let (before, after, diagnostics) = match arguments.as_slice() {
+        [command, before, after] if command == "diff-dir" => (before, after, false),
+        [command, flag, before, after] if command == "diff-dir" && flag == "--diagnostics" => {
+            (before, after, true)
+        }
+        _ => return Err(usage()),
+    };
+    let before = PathBuf::from(before);
+    let after = PathBuf::from(after);
+    let result = if diagnostics {
+        stackscout::diff_dirs_with_diagnostics(before, after)
+    } else {
+        stackscout::diff_dirs(before, after)
+    };
+    result.map_err(|error| error.to_string())
+}
+
+fn usage() -> String {
+    "usage: stackscout diff-dir [--diagnostics] <before-directory> <after-directory>".to_owned()
 }

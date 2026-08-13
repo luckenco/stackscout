@@ -1,5 +1,4 @@
-! incomplete (unchanged; omitted from both): syntax error in bad-export.ts near line 1
-! incomplete (introduced; omitted from both): syntax error in broken.ts near line 1
+! incomplete (introduced; omitted from both): broken.ts
 
 ~ ts:good.ts::good
 -   ts:good.ts::old_step

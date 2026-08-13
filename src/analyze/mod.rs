@@ -37,7 +37,35 @@ pub(crate) enum AnalyzeError {
 #[derive(Debug)]
 pub(crate) struct Issue {
     pub(crate) path: String,
-    pub(crate) message: String,
+    error: AnalyzeError,
+}
+
+impl Issue {
+    fn new(path: String, error: AnalyzeError) -> Self {
+        Self { path, error }
+    }
+
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        match (&self.error, &other.error) {
+            (AnalyzeError::Rejected(_), AnalyzeError::Rejected(_)) => true,
+            (
+                AnalyzeError::Syntax { line: before, .. },
+                AnalyzeError::Syntax { line: after, .. },
+            ) => before == after,
+            (AnalyzeError::InvalidNode(_), AnalyzeError::InvalidNode(_)) => true,
+            (
+                AnalyzeError::Unsupported {
+                    message: before, ..
+                },
+                AnalyzeError::Unsupported { message: after, .. },
+            ) => before == after,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        self.error.to_string()
+    }
 }
 
 pub(crate) struct Directory {
@@ -74,10 +102,7 @@ impl Analyzers {
             })?;
             match self.file(&relative, &source) {
                 Ok(artifact) => artifacts.push(artifact),
-                Err(error) => issues.push(Issue {
-                    path: relative,
-                    message: error.to_string(),
-                }),
+                Err(error) => issues.push(Issue::new(relative, error)),
             }
         }
         Ok(Directory { artifacts, issues })

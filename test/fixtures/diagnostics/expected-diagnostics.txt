@@ -1,0 +1,5 @@
+! incomplete (changed before; omitted from both): syntax error in changed.ts near line 1
+! incomplete (changed after; omitted from both): syntax error in changed.ts near line 2
+! incomplete (introduced; omitted from both): syntax error in introduced.ts near line 1
+! incomplete (resolved; omitted from both): syntax error in resolved.ts near line 1
+! incomplete (unchanged; omitted from both): syntax error in unchanged.ts near line 1

@@ -38,8 +38,8 @@ impl From<graph::GraphError> for Error {
 ///
 /// The supported file extensions are `.rs`, `.ts`, `.tsx`, `.mts`, and `.cts`. If a file cannot
 /// be analyzed in either directory, that path is omitted from both graphs and
-/// the output begins with deterministic `! incomplete` diagnostics. Diagnostics
-/// are classified as introduced, resolved, changed, or unchanged.
+/// introduced, resolved, and changed analysis issues produce concise `! incomplete`
+/// diagnostics. Unchanged issues are hidden by default.
 ///
 /// ```
 /// let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -49,9 +49,21 @@ impl From<graph::GraphError> for Error {
 /// # Ok::<(), stackscout::Error>(())
 /// ```
 pub fn diff_dirs(before: impl AsRef<Path>, after: impl AsRef<Path>) -> Result<String, Error> {
+    compare_dirs(before.as_ref(), after.as_ref(), false)
+}
+
+/// Compares two source directories and includes detailed unchanged analysis diagnostics.
+pub fn diff_dirs_with_diagnostics(
+    before: impl AsRef<Path>,
+    after: impl AsRef<Path>,
+) -> Result<String, Error> {
+    compare_dirs(before.as_ref(), after.as_ref(), true)
+}
+
+fn compare_dirs(before: &Path, after: &Path, diagnostics: bool) -> Result<String, Error> {
     let mut analyzers = analyze::Analyzers::new()?;
-    let mut before = analyzers.directory(before.as_ref())?;
-    let mut after = analyzers.directory(after.as_ref())?;
+    let mut before = analyzers.directory(before)?;
+    let mut after = analyzers.directory(after)?;
     let omitted = before
         .issues
         .iter()
@@ -74,6 +86,7 @@ pub fn diff_dirs(before: impl AsRef<Path>, after: impl AsRef<Path>) -> Result<St
         &after.issues,
         &omitted,
         graph_diff,
+        diagnostics,
     ))
 }
 
@@ -87,6 +100,7 @@ fn render_issues(
     after: &[analyze::Issue],
     omitted: &BTreeSet<String>,
     graph_diff: String,
+    diagnostics: bool,
 ) -> String {
     if omitted.is_empty() {
         return graph_diff;
@@ -97,35 +111,48 @@ fn render_issues(
         let before = before.iter().find(|issue| issue.path == path.as_str());
         let after = after.iter().find(|issue| issue.path == path.as_str());
         match (before, after) {
-            (Some(before), Some(after)) if before.message == after.message => {
-                output.push_str(&format!(
-                    "! incomplete (unchanged; omitted from both): {}\n",
-                    before.message
-                ));
+            (Some(before), Some(after)) if before.same_as(after) => {
+                if diagnostics {
+                    output.push_str(&format!(
+                        "! incomplete (unchanged; omitted from both): {}\n",
+                        before.message()
+                    ));
+                }
             }
-            (Some(before), Some(after)) => {
+            (Some(before), Some(after)) if diagnostics => {
                 output.push_str(&format!(
                     "! incomplete (changed before; omitted from both): {}\n",
-                    before.message
+                    before.message()
                 ));
                 output.push_str(&format!(
                     "! incomplete (changed after; omitted from both): {}\n",
-                    after.message
+                    after.message()
                 ));
             }
-            (Some(before), None) => output.push_str(&format!(
-                "! incomplete (resolved; omitted from both): {}\n",
-                before.message
+            (Some(_), Some(_)) => output.push_str(&format!(
+                "! incomplete (changed; omitted from both): {path}\n"
             )),
-            (None, Some(after)) => output.push_str(&format!(
+            (Some(before), None) if diagnostics => output.push_str(&format!(
+                "! incomplete (resolved; omitted from both): {}\n",
+                before.message()
+            )),
+            (Some(_), None) => output.push_str(&format!(
+                "! incomplete (resolved; omitted from both): {path}\n"
+            )),
+            (None, Some(after)) if diagnostics => output.push_str(&format!(
                 "! incomplete (introduced; omitted from both): {}\n",
-                after.message
+                after.message()
+            )),
+            (None, Some(_)) => output.push_str(&format!(
+                "! incomplete (introduced; omitted from both): {path}\n"
             )),
             (None, None) => unreachable!("an omitted path has an analysis issue"),
         }
     }
     if !graph_diff.is_empty() {
-        output.push('\n');
+        if !output.is_empty() {
+            output.push('\n');
+        }
         output.push_str(&graph_diff);
     }
     output

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::graph::{Graph, LocalShape};
 use crate::model::{Resolution, ResolvedStep, SourceRange, SymbolKey};
@@ -23,6 +23,7 @@ pub(crate) struct TreeNode {
     pub(crate) label: String,
     pub(crate) definition_location: Option<SourceRange>,
     pub(crate) call_site_location: Option<SourceRange>,
+    pub(crate) hide_when_unchanged: bool,
     pub(crate) local_shape: Option<LocalShape>,
     pub(crate) children: Vec<TreeNode>,
 }
@@ -39,6 +40,10 @@ impl TreeNode {
         }
         value.push('}');
         value
+    }
+
+    fn contains(&self, identity: &str) -> bool {
+        self.identity == identity || self.children.iter().any(|child| child.contains(identity))
     }
 }
 
@@ -65,15 +70,79 @@ pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
         }
     }
 
-    GraphDiff {
-        roots: roots
-            .into_iter()
-            .map(|key| RootDiff {
-                before: tree(before, &key),
-                after: tree(after, &key),
-            })
-            .collect(),
+    let mut minimal = minimal_roots(&roots, before);
+    minimal.extend(minimal_roots(&roots, after));
+    let mut output = minimal
+        .into_iter()
+        .filter_map(|key| {
+            let root = root_diff(before, after, &key);
+            root.is_changed().then_some(root)
+        })
+        .collect::<Vec<_>>();
+
+    for key in direct {
+        let identity = key.to_string();
+        if !output.iter().any(|root| root.contains(&identity)) {
+            output.push(root_diff(before, after, &key));
+        }
     }
+    output.sort_by(|left, right| left.identity().cmp(right.identity()));
+
+    GraphDiff { roots: output }
+}
+
+impl RootDiff {
+    fn is_changed(&self) -> bool {
+        match (&self.before, &self.after) {
+            (Some(before), Some(after)) => before.fingerprint() != after.fingerprint(),
+            (None, None) => false,
+            _ => true,
+        }
+    }
+
+    fn contains(&self, identity: &str) -> bool {
+        self.before
+            .iter()
+            .chain(&self.after)
+            .any(|tree| tree.contains(identity))
+    }
+
+    fn identity(&self) -> &str {
+        self.after
+            .as_ref()
+            .or(self.before.as_ref())
+            .map(|tree| tree.identity.as_str())
+            .expect("a diff root exists in at least one graph")
+    }
+}
+
+fn root_diff(before: &Graph, after: &Graph, key: &SymbolKey) -> RootDiff {
+    RootDiff {
+        before: tree(before, key),
+        after: tree(after, key),
+    }
+}
+
+fn minimal_roots(candidates: &BTreeSet<SymbolKey>, graph: &Graph) -> BTreeSet<SymbolKey> {
+    let callers = candidates
+        .iter()
+        .filter(|key| graph.symbols.contains_key(*key))
+        .map(|key| (key.clone(), callers_in(graph, key, candidates)))
+        .collect::<BTreeMap<_, _>>();
+
+    callers
+        .iter()
+        .filter(|(key, incoming)| {
+            let outside_cycle = incoming
+                .iter()
+                .any(|caller| !callers.get(caller).is_some_and(|seen| seen.contains(*key)));
+            if outside_cycle {
+                return false;
+            }
+            incoming.iter().all(|caller| *key < caller)
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
 }
 
 fn changed(key: &SymbolKey, before: &Graph, after: &Graph) -> bool {
@@ -104,18 +173,15 @@ fn exported_callers(graph: &Graph, changed: &SymbolKey) -> BTreeSet<SymbolKey> {
         }
     }
 
-    let roots = exported
-        .iter()
-        .filter(|key| !has_exported_caller(graph, key, &exported))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if roots.is_empty() && !exported.is_empty() {
-        return exported.into_iter().take(1).collect();
-    }
-    roots
+    minimal_roots(&exported, graph)
 }
 
-fn has_exported_caller(graph: &Graph, key: &SymbolKey, exported: &BTreeSet<SymbolKey>) -> bool {
+fn callers_in(
+    graph: &Graph,
+    key: &SymbolKey,
+    candidates: &BTreeSet<SymbolKey>,
+) -> BTreeSet<SymbolKey> {
+    let mut found = BTreeSet::new();
     let mut seen = BTreeSet::from([key.clone()]);
     let mut pending = graph
         .incoming
@@ -128,14 +194,14 @@ fn has_exported_caller(graph: &Graph, key: &SymbolKey, exported: &BTreeSet<Symbo
         if !seen.insert(caller.clone()) {
             continue;
         }
-        if exported.contains(&caller) {
-            return true;
+        if candidates.contains(&caller) {
+            found.insert(caller.clone());
         }
         if let Some(callers) = graph.incoming.get(&caller) {
             pending.extend(callers.iter().cloned());
         }
     }
-    false
+    found
 }
 
 fn tree(graph: &Graph, root: &SymbolKey) -> Option<TreeNode> {
@@ -166,6 +232,7 @@ fn expand(
         label: key.to_string(),
         definition_location: Some(node.symbol.location.clone()),
         call_site_location,
+        hide_when_unchanged: false,
         local_shape: Some(node.local_shape()),
         children: Vec::new(),
     };
@@ -206,6 +273,7 @@ fn expand_steps(
                     label: label.clone(),
                     definition_location: None,
                     call_site_location: Some(location.clone()),
+                    hide_when_unchanged: false,
                     local_shape: None,
                     children: if depth >= MAX_DEPTH {
                         vec![truncated()]
@@ -234,6 +302,7 @@ fn expand_steps(
                         label: format!("[unresolved: {target}]"),
                         definition_location: None,
                         call_site_location: Some(call.location.clone()),
+                        hide_when_unchanged: true,
                         local_shape: None,
                         children: Vec::new(),
                     });
@@ -245,6 +314,7 @@ fn expand_steps(
                         label: format!("[uncertain: {target} is locally bound]"),
                         definition_location: None,
                         call_site_location: Some(call.location.clone()),
+                        hide_when_unchanged: true,
                         local_shape: None,
                         children: Vec::new(),
                     });
@@ -281,6 +351,7 @@ fn expand_steps(
                         label: format!("[ambiguous: {target} -> {label}]"),
                         definition_location: None,
                         call_site_location: Some(call.location.clone()),
+                        hide_when_unchanged: false,
                         local_shape: None,
                         children,
                     });
@@ -297,6 +368,7 @@ fn cycle(key: &SymbolKey, location: &SourceRange) -> TreeNode {
         label: format!("{key} [cycle]"),
         definition_location: None,
         call_site_location: Some(location.clone()),
+        hide_when_unchanged: false,
         local_shape: None,
         children: Vec::new(),
     }
@@ -308,6 +380,7 @@ fn truncated() -> TreeNode {
         label: "[truncated]".to_owned(),
         definition_location: None,
         call_site_location: None,
+        hide_when_unchanged: false,
         local_shape: None,
         children: Vec::new(),
     }

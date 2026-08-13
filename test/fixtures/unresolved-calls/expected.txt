@@ -1,0 +1,9 @@
+~ ts:main.ts::reorder
++   [unresolved: secondMissing]
+-   [unresolved: secondMissing]
+
+~ ts:main.ts::replace
+-   [unresolved: oldMissing]
++   [unresolved: newMissing]
+
+~ ts:main.ts::syntaxOnly

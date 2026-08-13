@@ -1,0 +1,4 @@
+  ts:main.ts::run
+    [ambiguous: choose -> ts:a.ts::task, ts:b.ts::task]
+~     ts:a.ts::task
+      ts:b.ts::task

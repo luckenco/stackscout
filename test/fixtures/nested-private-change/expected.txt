@@ -1,0 +1,3 @@
+~ ts:main.ts::run
++   ts:main.ts::usage
++     ts:main.ts::work

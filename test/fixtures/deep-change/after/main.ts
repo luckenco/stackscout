@@ -1,0 +1,34 @@
+export function f0() { f1(); }
+function f1() { f2(); }
+function f2() { f3(); }
+function f3() { f4(); }
+function f4() { f5(); }
+function f5() { f6(); }
+function f6() { f7(); }
+function f7() { f8(); }
+function f8() { f9(); }
+function f9() { f10(); }
+function f10() { f11(); }
+function f11() { f12(); }
+function f12() { f13(); }
+function f13() { f14(); }
+function f14() { f15(); }
+function f15() { f16(); }
+function f16() { f17(); }
+function f17() { f18(); }
+function f18() { f19(); }
+function f19() { f20(); }
+function f20() { f21(); }
+function f21() { f22(); }
+function f22() { f23(); }
+function f23() { f24(); }
+function f24() { f25(); }
+function f25() { f26(); }
+function f26() { f27(); }
+function f27() { f28(); }
+function f28() { f29(); }
+function f29() { f30(); }
+function f30() { f31(); }
+function f31() { f32(); }
+function f32() { f33(); }
+function f33() { return 2; }

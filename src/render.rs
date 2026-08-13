@@ -52,7 +52,9 @@ fn pair(output: &mut String, before: &TreeNode, after: &TreeNode, depth: usize, 
                     let old = &before.children[old_index + offset];
                     let new = &after.children[new_index + offset];
                     if old.fingerprint() == new.fingerprint() {
-                        line(output, ' ', depth + 1, new, locations);
+                        if !new.hide_when_unchanged {
+                            line(output, ' ', depth + 1, new, locations);
+                        }
                     } else {
                         pair(output, old, new, depth + 1, locations);
                     }

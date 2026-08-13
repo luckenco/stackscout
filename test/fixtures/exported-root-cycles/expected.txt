@@ -1,0 +1,7 @@
+  rust:lib.rs::alpha
+    rust:lib.rs::beta
+~   rust:lib.rs::changed
+
+  rust:lib.rs::delta
+    rust:lib.rs::echo
+~   rust:lib.rs::changed
