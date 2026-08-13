@@ -1,5 +1,4 @@
-! incomplete: omitted broken.ts from both snapshots
-! after: syntax error in broken.ts near line 1
+! incomplete (introduced; omitted from both): syntax error in broken.ts near line 1
 
 ~ ts:good.ts::good
 -   ts:good.ts::old_step

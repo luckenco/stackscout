@@ -1,3 +1,1 @@
-! incomplete: omitted index.ts from both snapshots
-! before: syntax error in index.ts near line 1
-! after: syntax error in index.ts near line 1
+! incomplete (unchanged; omitted from both): syntax error in index.ts near line 1

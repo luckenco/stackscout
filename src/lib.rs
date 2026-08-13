@@ -38,7 +38,8 @@ impl From<graph::GraphError> for Error {
 ///
 /// The supported file extensions are `.rs`, `.ts`, and `.tsx`. If a file cannot
 /// be analyzed in either directory, that path is omitted from both graphs and
-/// the output begins with deterministic `! incomplete` diagnostics.
+/// the output begins with deterministic `! incomplete` diagnostics. Diagnostics
+/// are classified as introduced, resolved, changed, or unchanged.
 ///
 /// ```
 /// let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -93,15 +94,35 @@ fn render_issues(
 
     let mut output = String::new();
     for path in omitted {
-        output.push_str(&format!(
-            "! incomplete: omitted {path} from both snapshots\n"
-        ));
-    }
-    for issue in before {
-        output.push_str(&format!("! before: {}\n", issue.message));
-    }
-    for issue in after {
-        output.push_str(&format!("! after: {}\n", issue.message));
+        let before = before.iter().find(|issue| issue.path == path.as_str());
+        let after = after.iter().find(|issue| issue.path == path.as_str());
+        match (before, after) {
+            (Some(before), Some(after)) if before.message == after.message => {
+                output.push_str(&format!(
+                    "! incomplete (unchanged; omitted from both): {}\n",
+                    before.message
+                ));
+            }
+            (Some(before), Some(after)) => {
+                output.push_str(&format!(
+                    "! incomplete (changed before; omitted from both): {}\n",
+                    before.message
+                ));
+                output.push_str(&format!(
+                    "! incomplete (changed after; omitted from both): {}\n",
+                    after.message
+                ));
+            }
+            (Some(before), None) => output.push_str(&format!(
+                "! incomplete (resolved; omitted from both): {}\n",
+                before.message
+            )),
+            (None, Some(after)) => output.push_str(&format!(
+                "! incomplete (introduced; omitted from both): {}\n",
+                after.message
+            )),
+            (None, None) => unreachable!("an omitted path has an analysis issue"),
+        }
     }
     if !graph_diff.is_empty() {
         output.push('\n');
