@@ -19,6 +19,12 @@
 - Prefer small fixture-based behavioral tests over mocks, builders, and test-only
   abstractions.
 
+# Dogfooding
+
+- After Rust or TypeScript implementation edits that may affect the call graph, usually run
+  `call_graph_diff` once near the end.
+- Check for unintended impact. Report missing, noisy, or wrong results as dogfooding findings.
+
 # Rust
 
 - Keep things modular.
