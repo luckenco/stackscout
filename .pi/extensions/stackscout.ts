@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const READY = ".ready";
+const READY = ".ready-v2";
 
 export default function (pi: ExtensionAPI) {
 	let baseline: Promise<string> | undefined;
@@ -85,7 +85,26 @@ async function ensureBaseline(pi: ExtensionAPI, cwd: string, sessionId: string):
 
 	const files = await pi.exec(
 		"rg",
-		["--files", "--null", "--glob", "*.rs", "--glob", "*.ts", "--glob", "*.tsx"],
+		[
+			"--files",
+			"--null",
+			"--glob",
+			"*.rs",
+			"--glob",
+			"*.ts",
+			"--glob",
+			"*.tsx",
+			"--glob",
+			"*.mts",
+			"--glob",
+			"*.cts",
+			"--glob",
+			"!*.d.ts",
+			"--glob",
+			"!*.d.mts",
+			"--glob",
+			"!*.d.cts",
+		],
 		{ cwd },
 	);
 	if (files.code !== 0 && files.code !== 1) {

@@ -1,5 +1,6 @@
-export default function work() {
+function work() {
   newStep();
 }
 
 function newStep() {}
+export default work;

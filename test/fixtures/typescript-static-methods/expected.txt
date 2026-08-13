@@ -1,0 +1,4 @@
+  ts:main.ts::start
+~   ts:worker.ts::Worker::[static]::run
+-     ts:worker.ts::oldStatic
++     ts:worker.ts::newStatic

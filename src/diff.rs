@@ -21,7 +21,8 @@ pub(crate) struct RootDiff {
 pub(crate) struct TreeNode {
     pub(crate) identity: String,
     pub(crate) label: String,
-    pub(crate) location: Option<SourceRange>,
+    pub(crate) definition_location: Option<SourceRange>,
+    pub(crate) call_site_location: Option<SourceRange>,
     pub(crate) local_shape: Option<LocalShape>,
     pub(crate) children: Vec<TreeNode>,
 }
@@ -94,7 +95,7 @@ fn exported_callers(graph: &Graph, changed: &SymbolKey) -> BTreeSet<SymbolKey> {
         if graph
             .symbols
             .get(&key)
-            .is_some_and(|node| node.symbol.export.is_public())
+            .is_some_and(|node| node.symbol.visibility.is_public())
         {
             exported.insert(key.clone());
         }
@@ -138,12 +139,12 @@ fn has_exported_caller(graph: &Graph, key: &SymbolKey, exported: &BTreeSet<Symbo
 }
 
 fn tree(graph: &Graph, root: &SymbolKey) -> Option<TreeNode> {
-    let node = graph.symbols.get(root)?;
+    graph.symbols.get(root)?;
     let mut nodes = 0;
     Some(expand(
         graph,
         root,
-        node.symbol.location.clone(),
+        None,
         0,
         &mut nodes,
         &mut BTreeSet::new(),
@@ -153,7 +154,7 @@ fn tree(graph: &Graph, root: &SymbolKey) -> Option<TreeNode> {
 fn expand(
     graph: &Graph,
     key: &SymbolKey,
-    location: SourceRange,
+    call_site_location: Option<SourceRange>,
     depth: usize,
     nodes: &mut usize,
     path: &mut BTreeSet<SymbolKey>,
@@ -163,7 +164,8 @@ fn expand(
     let mut output = TreeNode {
         identity: key.to_string(),
         label: key.to_string(),
-        location: Some(location),
+        definition_location: Some(node.symbol.location.clone()),
+        call_site_location,
         local_shape: Some(node.local_shape()),
         children: Vec::new(),
     };
@@ -202,26 +204,25 @@ fn expand_steps(
                 output.push(TreeNode {
                     identity: format!("[branch:{key}]"),
                     label: label.clone(),
-                    location: Some(location.clone()),
+                    definition_location: None,
+                    call_site_location: Some(location.clone()),
                     local_shape: None,
-                    children: expand_steps(graph, children, depth, nodes, path),
+                    children: if depth >= MAX_DEPTH {
+                        vec![truncated()]
+                    } else {
+                        expand_steps(graph, children, depth + 1, nodes, path)
+                    },
                 });
             }
             ResolvedStep::Call(call) => match &call.resolution {
                 Resolution::Resolved(callee) if path.contains(callee) => {
                     *nodes += 1;
-                    output.push(TreeNode {
-                        identity: callee.to_string(),
-                        label: format!("{callee} [cycle]"),
-                        location: Some(call.location.clone()),
-                        local_shape: None,
-                        children: Vec::new(),
-                    });
+                    output.push(cycle(callee, &call.location));
                 }
                 Resolution::Resolved(callee) => output.push(expand(
                     graph,
                     callee,
-                    call.location.clone(),
+                    Some(call.location.clone()),
                     depth + 1,
                     nodes,
                     path,
@@ -231,24 +232,57 @@ fn expand_steps(
                     output.push(TreeNode {
                         identity: call.resolution.identity(),
                         label: format!("[unresolved: {target}]"),
-                        location: Some(call.location.clone()),
+                        definition_location: None,
+                        call_site_location: Some(call.location.clone()),
+                        local_shape: None,
+                        children: Vec::new(),
+                    });
+                }
+                Resolution::Uncertain(target) => {
+                    *nodes += 1;
+                    output.push(TreeNode {
+                        identity: call.resolution.identity(),
+                        label: format!("[uncertain: {target} is locally bound]"),
+                        definition_location: None,
+                        call_site_location: Some(call.location.clone()),
                         local_shape: None,
                         children: Vec::new(),
                     });
                 }
                 Resolution::Ambiguous { target, candidates } => {
                     *nodes += 1;
-                    let candidates = candidates
+                    let label = candidates
                         .iter()
                         .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join(", ");
+                    let mut children = Vec::new();
+                    for candidate in candidates {
+                        if *nodes >= MAX_NODES {
+                            children.push(truncated());
+                            break;
+                        }
+                        if path.contains(candidate) {
+                            *nodes += 1;
+                            children.push(cycle(candidate, &call.location));
+                        } else {
+                            children.push(expand(
+                                graph,
+                                candidate,
+                                Some(call.location.clone()),
+                                depth + 1,
+                                nodes,
+                                path,
+                            ));
+                        }
+                    }
                     output.push(TreeNode {
                         identity: call.resolution.identity(),
-                        label: format!("[ambiguous: {target} -> {candidates}]"),
-                        location: Some(call.location.clone()),
+                        label: format!("[ambiguous: {target} -> {label}]"),
+                        definition_location: None,
+                        call_site_location: Some(call.location.clone()),
                         local_shape: None,
-                        children: Vec::new(),
+                        children,
                     });
                 }
             },
@@ -257,11 +291,23 @@ fn expand_steps(
     output
 }
 
+fn cycle(key: &SymbolKey, location: &SourceRange) -> TreeNode {
+    TreeNode {
+        identity: key.to_string(),
+        label: format!("{key} [cycle]"),
+        definition_location: None,
+        call_site_location: Some(location.clone()),
+        local_shape: None,
+        children: Vec::new(),
+    }
+}
+
 fn truncated() -> TreeNode {
     TreeNode {
         identity: "[truncated]".to_owned(),
         label: "[truncated]".to_owned(),
-        location: None,
+        definition_location: None,
+        call_site_location: None,
         local_shape: None,
         children: Vec::new(),
     }

@@ -1,0 +1,3 @@
+~ ts:main.ts::work
+-   ts:main.ts::oldStep
++   ts:main.ts::newStep

@@ -4,9 +4,15 @@ use tree_sitter::Node;
 
 use super::{AnalyzeError, compact, first_named, range, shape, text};
 use crate::model::{
-    CallSite, CallTarget, Export, FileArtifact, Import, ImportTarget, Language, LocalStep,
-    LocalSymbol, SymbolKey,
+    CallSite, CallTarget, ExportBinding, ExportName, FileArtifact, Import, ImportTarget, Language,
+    LocalStep, LocalSymbol, SymbolKey, Visibility,
 };
+
+#[derive(Clone, Copy)]
+struct Member<'a> {
+    class: &'a str,
+    is_static: bool,
+}
 
 pub(super) fn extract(
     path: &str,
@@ -18,9 +24,12 @@ pub(super) fn extract(
         path: path.to_owned(),
         symbols: Vec::new(),
         imports: Vec::new(),
+        exports: Vec::new(),
     };
     imports(path, source, root, &mut artifact.imports)?;
-    definitions(path, source, root, None, Export::Private, &mut artifact)?;
+    exports(path, source, root, &mut artifact.exports)?;
+    definitions(path, source, root, None, &mut artifact)?;
+    apply_exports(&mut artifact);
     Ok(artifact)
 }
 
@@ -112,35 +121,173 @@ fn collect_imports(
     Ok(())
 }
 
+fn exports(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut Vec<ExportBinding>,
+) -> Result<(), AnalyzeError> {
+    if node.kind() == "export_statement" {
+        collect_exports(path, source, node, output)?;
+        return Ok(());
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        exports(path, source, child, output)?;
+    }
+    Ok(())
+}
+
+fn collect_exports(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut Vec<ExportBinding>,
+) -> Result<(), AnalyzeError> {
+    let is_default = text(path, source, node)?.starts_with("export default");
+    if let Some(declaration) = node.child_by_field_name("declaration") {
+        if is_default {
+            if let Some(name) = declaration.child_by_field_name("name") {
+                output.push(ExportBinding {
+                    local: text(path, source, name)?.to_owned(),
+                    exported: ExportName::Default,
+                });
+            }
+        } else {
+            collect_exported_declarations(path, source, declaration, output)?;
+        }
+        return Ok(());
+    }
+    if let Some(value) = node.child_by_field_name("value") {
+        if is_default {
+            let local = if is_function_value(value) {
+                "default"
+            } else if let Some(name) = value.child_by_field_name("name") {
+                text(path, source, name)?
+            } else {
+                text(path, source, value)?
+            };
+            output.push(ExportBinding {
+                local: local.to_owned(),
+                exported: ExportName::Default,
+            });
+        }
+        return Ok(());
+    }
+
+    if node.child_by_field_name("source").is_some() {
+        return Ok(());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "export_clause" {
+            continue;
+        }
+        let mut clause = child.walk();
+        for specifier in child.named_children(&mut clause) {
+            if specifier.kind() != "export_specifier" {
+                continue;
+            }
+            let Some(name) = specifier.child_by_field_name("name") else {
+                continue;
+            };
+            let local = text(path, source, name)?.trim_matches(['\'', '"']);
+            let exported = specifier
+                .child_by_field_name("alias")
+                .map(|alias| text(path, source, alias))
+                .transpose()?
+                .unwrap_or(local)
+                .trim_matches(['\'', '"']);
+            output.push(ExportBinding {
+                local: local.to_owned(),
+                exported: ExportName::Named(exported.to_owned()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn collect_exported_declarations(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut Vec<ExportBinding>,
+) -> Result<(), AnalyzeError> {
+    if matches!(
+        node.kind(),
+        "function_declaration"
+            | "generator_function_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration"
+    ) {
+        if let Some(name) = node.child_by_field_name("name") {
+            let name = text(path, source, name)?.to_owned();
+            output.push(ExportBinding {
+                local: name.clone(),
+                exported: ExportName::Named(name),
+            });
+        }
+        return Ok(());
+    }
+    if node.kind() == "variable_declarator" {
+        if let Some(name) = node.child_by_field_name("name")
+            && name.kind() == "identifier"
+        {
+            let name = text(path, source, name)?.to_owned();
+            output.push(ExportBinding {
+                local: name.clone(),
+                exported: ExportName::Named(name),
+            });
+        }
+        return Ok(());
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_exported_declarations(path, source, child, output)?;
+    }
+    Ok(())
+}
+
+fn apply_exports(artifact: &mut FileArtifact) {
+    for symbol in &mut artifact.symbols {
+        let Some(local) = symbol.key.qualified_name.first() else {
+            continue;
+        };
+        if artifact
+            .exports
+            .iter()
+            .any(|binding| binding.local == *local)
+        {
+            symbol.visibility = Visibility::Public;
+        }
+    }
+}
+
 fn definitions(
     path: &str,
     source: &str,
     node: Node<'_>,
     class_name: Option<&str>,
-    inherited_export: Export,
     artifact: &mut FileArtifact,
 ) -> Result<(), AnalyzeError> {
     match node.kind() {
         "export_statement" => {
-            let export = if text(path, source, node)?.starts_with("export default") {
-                Export::Default
-            } else {
-                Export::Named
-            };
             if let Some(value) = node.child_by_field_name("value")
                 && is_function_value(value)
             {
-                add_function(path, source, value, Some("default"), None, export, artifact)?;
+                add_function(path, source, value, Some("default"), None, artifact)?;
                 return Ok(());
             }
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                definitions(path, source, child, class_name, export, artifact)?;
+                definitions(path, source, child, class_name, artifact)?;
             }
             return Ok(());
         }
         "function_declaration" | "generator_function_declaration" => {
-            add_function(path, source, node, None, None, inherited_export, artifact)?;
+            add_function(path, source, node, None, None, artifact)?;
             return Ok(());
         }
         "variable_declarator" => {
@@ -156,8 +303,10 @@ fn definitions(
                     source,
                     value,
                     Some(text(path, source, name)?),
-                    class_name,
-                    inherited_export,
+                    class_name.map(|class| Member {
+                        class,
+                        is_static: false,
+                    }),
                     artifact,
                 )?;
             }
@@ -170,8 +319,10 @@ fn definitions(
                     source,
                     node,
                     None,
-                    class_name,
-                    inherited_export,
+                    class_name.map(|class| Member {
+                        class,
+                        is_static: is_static(node),
+                    }),
                     artifact,
                 )?;
             }
@@ -197,8 +348,10 @@ fn definitions(
                 source,
                 value,
                 Some(text(path, source, name)?),
-                Some(class_name),
-                inherited_export,
+                Some(Member {
+                    class: class_name,
+                    is_static: is_static(node),
+                }),
                 artifact,
             )?;
             return Ok(());
@@ -208,11 +361,10 @@ fn definitions(
                 return Ok(());
             };
             let name = text(path, source, name_node)?;
-            let method_export = inherited_export;
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    definitions(path, source, child, Some(name), method_export, artifact)?;
+                    definitions(path, source, child, Some(name), artifact)?;
                 }
             }
             return Ok(());
@@ -223,7 +375,7 @@ fn definitions(
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        definitions(path, source, child, class_name, inherited_export, artifact)?;
+        definitions(path, source, child, class_name, artifact)?;
     }
     Ok(())
 }
@@ -233,8 +385,7 @@ fn add_function(
     source: &str,
     node: Node<'_>,
     explicit_name: Option<&str>,
-    class_name: Option<&str>,
-    export: Export,
+    member: Option<Member<'_>>,
     artifact: &mut FileArtifact,
 ) -> Result<(), AnalyzeError> {
     let name = if let Some(name) = explicit_name {
@@ -255,8 +406,11 @@ fn add_function(
             message: format!("function {name} has no body"),
         })?;
     let mut qualified_name = Vec::new();
-    if let Some(class_name) = class_name {
-        qualified_name.push(class_name.to_owned());
+    if let Some(member) = member {
+        qualified_name.push(member.class.to_owned());
+        if member.is_static {
+            qualified_name.push("[static]".to_owned());
+        }
     }
     qualified_name.push(name.to_owned());
     let bindings = bindings(path, source, node, body)?;
@@ -268,7 +422,7 @@ fn add_function(
         },
         module: Vec::new(),
         location: range(node),
-        export,
+        visibility: Visibility::Private,
         shape: shape(path, source, definition_node(node))?,
         steps: steps(path, source, body, &bindings)?,
     });
@@ -296,6 +450,14 @@ fn collect_steps(
     if is_nested_function(node.kind()) {
         return Ok(());
     }
+
+    let mut scoped = None;
+    if is_lexical_scope(node.kind()) {
+        let mut names = bindings.clone();
+        scope_bindings(path, source, node, &mut names)?;
+        scoped = Some(names);
+    }
+    let bindings = scoped.as_ref().unwrap_or(bindings);
     if node.kind() == "if_statement" {
         collect_if(path, source, node, false, bindings, output)?;
         return Ok(());
@@ -472,8 +634,28 @@ fn bindings(
     if let Some(parameter) = function.child_by_field_name("parameter") {
         binding_names(path, source, parameter, &mut output)?;
     }
-    local_bindings(path, source, body, &mut output)?;
+    function_bindings(path, source, body, &mut output)?;
     Ok(output)
+}
+
+fn function_bindings(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut BTreeSet<String>,
+) -> Result<(), AnalyzeError> {
+    if is_nested_function(node.kind()) {
+        return Ok(());
+    }
+    if node.kind() == "variable_declaration" {
+        declaration_bindings(path, source, node, output)?;
+        return Ok(());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        function_bindings(path, source, child, output)?;
+    }
+    Ok(())
 }
 
 fn parameter_bindings(
@@ -502,38 +684,50 @@ fn parameter_bindings(
     Ok(())
 }
 
-fn local_bindings(
+fn scope_bindings(
     path: &str,
     source: &str,
     node: Node<'_>,
     output: &mut BTreeSet<String>,
 ) -> Result<(), AnalyzeError> {
-    match node.kind() {
-        "variable_declarator" => {
-            if let Some(name) = node.child_by_field_name("name") {
-                binding_names(path, source, name, output)?;
+    if node.kind() == "catch_clause"
+        && let Some(parameter) = node.child_by_field_name("parameter")
+    {
+        binding_names(path, source, parameter, output)?;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "lexical_declaration" | "variable_declaration" => {
+                declaration_bindings(path, source, child, output)?;
             }
-            return Ok(());
-        }
-        "function_declaration" | "generator_function_declaration" | "class_declaration" => {
-            if let Some(name) = node.child_by_field_name("name") {
-                binding_names(path, source, name, output)?;
+            "function_declaration" | "generator_function_declaration" | "class_declaration" => {
+                if let Some(name) = child.child_by_field_name("name") {
+                    binding_names(path, source, name, output)?;
+                }
             }
-            return Ok(());
+            _ => {}
         }
-        "arrow_function" | "function_expression" | "generator_function" | "method_definition" => {
-            return Ok(());
+    }
+    Ok(())
+}
+
+fn declaration_bindings(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut BTreeSet<String>,
+) -> Result<(), AnalyzeError> {
+    if node.kind() == "variable_declarator" {
+        if let Some(name) = node.child_by_field_name("name") {
+            binding_names(path, source, name, output)?;
         }
-        "catch_clause" => {
-            if let Some(parameter) = node.child_by_field_name("parameter") {
-                binding_names(path, source, parameter, output)?;
-            }
-        }
-        _ => {}
+        return Ok(());
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        local_bindings(path, source, child, output)?;
+        declaration_bindings(path, source, child, output)?;
     }
     Ok(())
 }
@@ -576,6 +770,13 @@ fn is_function_value(node: Node<'_>) -> bool {
     )
 }
 
+fn is_lexical_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "statement_block" | "catch_clause" | "switch_body" | "for_statement" | "for_in_statement"
+    )
+}
+
 fn is_nested_function(kind: &str) -> bool {
     matches!(
         kind,
@@ -592,4 +793,10 @@ fn is_accessor(node: Node<'_>) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .any(|child| matches!(child.kind(), "get" | "set"))
+}
+
+fn is_static(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| child.kind() == "static")
 }

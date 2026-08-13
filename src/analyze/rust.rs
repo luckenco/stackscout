@@ -2,7 +2,7 @@ use tree_sitter::Node;
 
 use super::{AnalyzeError, compact, first_named, range, shape, text};
 use crate::model::{
-    CallSite, CallTarget, Export, FileArtifact, Language, LocalStep, LocalSymbol, SymbolKey,
+    CallSite, CallTarget, FileArtifact, Language, LocalStep, LocalSymbol, SymbolKey, Visibility,
 };
 
 pub(super) fn extract(
@@ -15,6 +15,7 @@ pub(super) fn extract(
         path: path.to_owned(),
         symbols: Vec::new(),
         imports: Vec::new(),
+        exports: Vec::new(),
     };
     definitions(path, source, root, &[], None, &mut artifact)?;
     Ok(artifact)
@@ -51,10 +52,10 @@ fn definitions(
                 },
                 module: modules.to_vec(),
                 location: range(node),
-                export: if has_child(node, "visibility_modifier") {
-                    Export::Named
+                visibility: if has_child(node, "visibility_modifier") {
+                    Visibility::Public
                 } else {
-                    Export::Private
+                    Visibility::Private
                 },
                 shape: shape(path, source, node)?,
                 steps: steps(path, source, body)?,

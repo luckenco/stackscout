@@ -88,16 +88,27 @@ pub(crate) struct Import {
     pub(crate) source: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Export {
-    Private,
-    Named,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ExportName {
+    Named(String),
     Default,
 }
 
-impl Export {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExportBinding {
+    pub(crate) local: String,
+    pub(crate) exported: ExportName,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Visibility {
+    Private,
+    Public,
+}
+
+impl Visibility {
     pub(crate) fn is_public(self) -> bool {
-        self != Self::Private
+        self == Self::Public
     }
 }
 
@@ -106,7 +117,7 @@ pub(crate) struct LocalSymbol {
     pub(crate) key: SymbolKey,
     pub(crate) module: Vec<String>,
     pub(crate) location: SourceRange,
-    pub(crate) export: Export,
+    pub(crate) visibility: Visibility,
     pub(crate) shape: String,
     pub(crate) steps: Vec<LocalStep>,
 }
@@ -134,12 +145,14 @@ pub(crate) struct FileArtifact {
     pub(crate) path: String,
     pub(crate) symbols: Vec<LocalSymbol>,
     pub(crate) imports: Vec<Import>,
+    pub(crate) exports: Vec<ExportBinding>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Resolution {
     Resolved(SymbolKey),
     Unresolved(CallTarget),
+    Uncertain(CallTarget),
     Ambiguous {
         target: CallTarget,
         candidates: Vec<SymbolKey>,
@@ -151,6 +164,7 @@ impl Resolution {
         match self {
             Self::Resolved(key) => key.to_string(),
             Self::Unresolved(target) => format!("?{target}"),
+            Self::Uncertain(target) => format!("~{target}"),
             Self::Ambiguous { target, candidates } => format!(
                 "!{target}:{}",
                 candidates

@@ -53,6 +53,11 @@ fn unresolved_and_ambiguous_calls_are_explicit() {
 }
 
 #[test]
+fn ambiguous_calls_show_which_possible_callee_changed() {
+    fixture("ambiguous-impact");
+}
+
+#[test]
 fn resolution_changes_when_defining_files_change() {
     fixture("resolution-transition");
 }
@@ -73,6 +78,16 @@ fn typescript_bindings_shadow_file_functions() {
 }
 
 #[test]
+fn typescript_block_bindings_do_not_shadow_outer_calls() {
+    fixture("typescript-block-scope");
+}
+
+#[test]
+fn typescript_var_bindings_apply_to_the_whole_function() {
+    fixture("typescript-function-scope");
+}
+
+#[test]
 fn typescript_object_methods_do_not_collide_with_class_methods() {
     fixture("typescript-object-methods");
 }
@@ -80,6 +95,11 @@ fn typescript_object_methods_do_not_collide_with_class_methods() {
 #[test]
 fn typescript_accessors_do_not_collide_with_class_methods() {
     fixture("typescript-accessors");
+}
+
+#[test]
+fn typescript_static_and_instance_methods_have_distinct_identities() {
+    fixture("typescript-static-methods");
 }
 
 #[test]
@@ -96,6 +116,11 @@ fn rust_trait_impls_have_distinct_symbol_identities() {
 #[test]
 fn typescript_export_changes_are_semantic() {
     fixture("typescript-export");
+}
+
+#[test]
+fn typescript_export_aliases_resolve_to_local_symbols() {
+    fixture("typescript-export-alias");
 }
 
 #[test]

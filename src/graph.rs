@@ -2,18 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
-use crate::model::{Export, LocalSymbol, Resolution, ResolvedProgram, ResolvedStep, SymbolKey};
+use crate::model::{LocalSymbol, Resolution, ResolvedProgram, ResolvedStep, SymbolKey, Visibility};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocalShape {
-    pub(crate) export: Export,
+    pub(crate) visibility: Visibility,
     pub(crate) syntax: String,
     pub(crate) steps: Vec<String>,
 }
 
 impl LocalShape {
     pub(crate) fn fingerprint(&self) -> String {
-        format!("{:?}\n{}\n{:?}", self.export, self.syntax, self.steps)
+        format!("{:?}\n{}\n{:?}", self.visibility, self.syntax, self.steps)
     }
 }
 
@@ -26,7 +26,7 @@ pub(crate) struct GraphNode {
 impl GraphNode {
     pub(crate) fn local_shape(&self) -> LocalShape {
         LocalShape {
-            export: self.symbol.export,
+            visibility: self.symbol.visibility,
             syntax: self.symbol.shape.clone(),
             steps: self.steps.iter().map(step_identity).collect(),
         }
@@ -89,7 +89,7 @@ fn add_incoming(
                             .insert(caller.clone());
                     }
                 }
-                Resolution::Unresolved(_) => {}
+                Resolution::Unresolved(_) | Resolution::Uncertain(_) => {}
             },
             ResolvedStep::Branch { children, .. } => add_incoming(caller, children, incoming),
         }

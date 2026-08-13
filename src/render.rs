@@ -101,7 +101,11 @@ fn line(output: &mut String, marker: char, depth: usize, node: &TreeNode, locati
     output.push(' ');
     output.push_str(&"  ".repeat(depth));
     output.push_str(&node.label);
-    if locations && let Some(location) = &node.location {
+    let location = node
+        .call_site_location
+        .as_ref()
+        .or(node.definition_location.as_ref());
+    if locations && let Some(location) = location {
         write!(
             output,
             " @ {}:{}-{}:{}",

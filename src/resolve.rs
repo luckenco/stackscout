@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::model::{
-    CallTarget, FileArtifact, Import, ImportTarget, Language, LocalStep, LocalSymbol, Resolution,
-    ResolvedCall, ResolvedProgram, ResolvedStep, ResolvedSymbol, SymbolKey,
+    CallTarget, ExportBinding, ExportName, FileArtifact, Import, ImportTarget, Language, LocalStep,
+    LocalSymbol, Resolution, ResolvedCall, ResolvedProgram, ResolvedStep, ResolvedSymbol,
+    SymbolKey,
 };
 
 pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
@@ -14,6 +15,10 @@ pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
     let imports = artifacts
         .iter()
         .map(|artifact| (artifact.path.as_str(), artifact.imports.as_slice()))
+        .collect::<BTreeMap<_, _>>();
+    let exports = artifacts
+        .iter()
+        .map(|artifact| (artifact.path.as_str(), artifact.exports.as_slice()))
         .collect::<BTreeMap<_, _>>();
 
     let mut symbols = Vec::new();
@@ -26,6 +31,7 @@ pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
                     symbol,
                     artifact.language,
                     imports.get(artifact.path.as_str()).copied().unwrap_or(&[]),
+                    &exports,
                     &all_symbols,
                 ),
             });
@@ -40,13 +46,14 @@ fn resolve_steps(
     caller: &LocalSymbol,
     language: Language,
     imports: &[Import],
+    exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &[&LocalSymbol],
 ) -> Vec<ResolvedStep> {
     steps
         .iter()
         .map(|step| match step {
             LocalStep::Call(call) => ResolvedStep::Call(ResolvedCall {
-                resolution: target(caller, &call.target, language, imports, symbols),
+                resolution: target(caller, &call.target, language, imports, exports, symbols),
                 location: call.location.clone(),
             }),
             LocalStep::Branch {
@@ -58,7 +65,7 @@ fn resolve_steps(
                 key: key.clone(),
                 label: label.clone(),
                 location: location.clone(),
-                children: resolve_steps(children, caller, language, imports, symbols),
+                children: resolve_steps(children, caller, language, imports, exports, symbols),
             },
         })
         .collect()
@@ -69,6 +76,7 @@ fn target(
     target: &CallTarget,
     language: Language,
     imports: &[Import],
+    exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &[&crate::model::LocalSymbol],
 ) -> Resolution {
     let mut candidates = BTreeSet::new();
@@ -91,18 +99,26 @@ fn target(
                     ImportTarget::Named(imported) => imported_symbol(
                         &caller.key,
                         import,
-                        std::slice::from_ref(imported),
+                        &ExportName::Named(imported.clone()),
+                        &[],
+                        exports,
                         symbols,
                         &mut candidates,
                     ),
-                    ImportTarget::Default => {
-                        imported_default(&caller.key, import, symbols, &mut candidates)
-                    }
+                    ImportTarget::Default => imported_symbol(
+                        &caller.key,
+                        import,
+                        &ExportName::Default,
+                        &[],
+                        exports,
+                        symbols,
+                        &mut candidates,
+                    ),
                     ImportTarget::Namespace => {}
                 }
             }
         }
-        CallTarget::Bound(_) => {}
+        CallTarget::Bound(_) => return Resolution::Uncertain(target.clone()),
         CallTarget::ThisMethod(name)
         | CallTarget::SelfMethod(name)
         | CallTarget::SelfAssociated(name) => {
@@ -112,12 +128,46 @@ fn target(
             same_file(&caller.key, &qualified, symbols, &mut candidates);
         }
         CallTarget::Path(path) => {
-            same_file(&caller.key, path, symbols, &mut candidates);
-            if let Some((namespace, rest)) = path.split_first() {
-                for import in imports.iter().filter(|import| {
-                    import.local == *namespace && import.target == ImportTarget::Namespace
-                }) {
-                    imported_symbol(&caller.key, import, rest, symbols, &mut candidates);
+            if language == Language::TypeScript && path.len() > 1 {
+                same_file(&caller.key, &static_suffix(path), symbols, &mut candidates);
+            } else {
+                same_file(&caller.key, path, symbols, &mut candidates);
+            }
+            if let Some((local, rest)) = path.split_first() {
+                for import in imports.iter().filter(|import| import.local == *local) {
+                    match &import.target {
+                        ImportTarget::Named(exported) => imported_symbol(
+                            &caller.key,
+                            import,
+                            &ExportName::Named(exported.clone()),
+                            &static_suffix(rest),
+                            exports,
+                            symbols,
+                            &mut candidates,
+                        ),
+                        ImportTarget::Default => imported_symbol(
+                            &caller.key,
+                            import,
+                            &ExportName::Default,
+                            &static_suffix(rest),
+                            exports,
+                            symbols,
+                            &mut candidates,
+                        ),
+                        ImportTarget::Namespace => {
+                            if let Some((exported, rest)) = rest.split_first() {
+                                imported_symbol(
+                                    &caller.key,
+                                    import,
+                                    &ExportName::Named(exported.clone()),
+                                    &static_suffix(rest),
+                                    exports,
+                                    symbols,
+                                    &mut candidates,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             if language == Language::Rust {
@@ -132,19 +182,39 @@ fn target(
                 for import in imports.iter().filter(|import| import.local == *local) {
                     match &import.target {
                         ImportTarget::Named(imported) => {
-                            let mut target = vec![imported.clone()];
-                            target.extend_from_slice(rest);
-                            target.push("constructor".to_owned());
-                            imported_symbol(&caller.key, import, &target, symbols, &mut candidates);
+                            let mut suffix = rest.to_vec();
+                            suffix.push("constructor".to_owned());
+                            imported_symbol(
+                                &caller.key,
+                                import,
+                                &ExportName::Named(imported.clone()),
+                                &suffix,
+                                exports,
+                                symbols,
+                                &mut candidates,
+                            );
                         }
                         ImportTarget::Namespace => {
-                            let mut target = rest.to_vec();
-                            target.push("constructor".to_owned());
-                            imported_symbol(&caller.key, import, &target, symbols, &mut candidates);
+                            if let Some((exported, rest)) = rest.split_first() {
+                                let mut suffix = rest.to_vec();
+                                suffix.push("constructor".to_owned());
+                                imported_symbol(
+                                    &caller.key,
+                                    import,
+                                    &ExportName::Named(exported.clone()),
+                                    &suffix,
+                                    exports,
+                                    symbols,
+                                    &mut candidates,
+                                );
+                            }
                         }
-                        ImportTarget::Default if rest.is_empty() => imported_default_constructor(
+                        ImportTarget::Default if rest.is_empty() => imported_symbol(
                             &caller.key,
                             import,
+                            &ExportName::Default,
+                            &["constructor".to_owned()],
+                            exports,
                             symbols,
                             &mut candidates,
                         ),
@@ -183,68 +253,45 @@ fn same_file(
     );
 }
 
+fn static_suffix(path: &[String]) -> Vec<String> {
+    let mut qualified = path.to_vec();
+    if !qualified.is_empty() {
+        qualified.insert(qualified.len() - 1, "[static]".to_owned());
+    }
+    qualified
+}
+
 fn imported_symbol(
     caller: &SymbolKey,
     import: &Import,
-    qualified: &[String],
+    exported: &ExportName,
+    suffix: &[String],
+    exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &[&crate::model::LocalSymbol],
     output: &mut BTreeSet<SymbolKey>,
 ) {
-    let files = import_files(&caller.file, &import.source);
-    output.extend(
-        symbols
+    for file in import_files(&caller.file, &import.source) {
+        let Some(bindings) = exports.get(file.as_str()) else {
+            continue;
+        };
+        for binding in bindings
             .iter()
-            .filter(|symbol| {
-                symbol.key.language == caller.language
-                    && files.contains(&symbol.key.file)
-                    && symbol.key.qualified_name == qualified
-                    && symbol.export == crate::model::Export::Named
-            })
-            .map(|symbol| symbol.key.clone()),
-    );
-}
-
-fn imported_default(
-    caller: &SymbolKey,
-    import: &Import,
-    symbols: &[&LocalSymbol],
-    output: &mut BTreeSet<SymbolKey>,
-) {
-    let files = import_files(&caller.file, &import.source);
-    output.extend(
-        symbols
-            .iter()
-            .filter(|symbol| {
-                symbol.key.language == caller.language
-                    && files.contains(&symbol.key.file)
-                    && symbol.export == crate::model::Export::Default
-            })
-            .map(|symbol| symbol.key.clone()),
-    );
-}
-
-fn imported_default_constructor(
-    caller: &SymbolKey,
-    import: &Import,
-    symbols: &[&LocalSymbol],
-    output: &mut BTreeSet<SymbolKey>,
-) {
-    let files = import_files(&caller.file, &import.source);
-    output.extend(
-        symbols
-            .iter()
-            .filter(|symbol| {
-                symbol.key.language == caller.language
-                    && files.contains(&symbol.key.file)
-                    && symbol.export == crate::model::Export::Default
-                    && symbol
-                        .key
-                        .qualified_name
-                        .last()
-                        .is_some_and(|name| name == "constructor")
-            })
-            .map(|symbol| symbol.key.clone()),
-    );
+            .filter(|binding| binding.exported == *exported)
+        {
+            let mut qualified = vec![binding.local.clone()];
+            qualified.extend_from_slice(suffix);
+            output.extend(
+                symbols
+                    .iter()
+                    .filter(|symbol| {
+                        symbol.key.language == caller.language
+                            && symbol.key.file == file
+                            && symbol.key.qualified_name == qualified
+                    })
+                    .map(|symbol| symbol.key.clone()),
+            );
+        }
+    }
 }
 
 fn import_files(caller: &str, source: &str) -> BTreeSet<String> {
