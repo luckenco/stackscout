@@ -1,7 +1,9 @@
 use tree_sitter::Node;
 
-use super::{AnalyzeError, range, shape, text};
-use crate::model::{CallSite, CallTarget, Export, FileArtifact, Language, LocalSymbol, SymbolKey};
+use super::{AnalyzeError, compact, first_named, range, shape, text};
+use crate::model::{
+    CallSite, CallTarget, Export, FileArtifact, Language, LocalStep, LocalSymbol, SymbolKey,
+};
 
 pub(super) fn extract(
     path: &str,
@@ -12,7 +14,6 @@ pub(super) fn extract(
         language: Language::Rust,
         path: path.to_owned(),
         symbols: Vec::new(),
-        calls: Vec::new(),
         imports: Vec::new(),
     };
     definitions(path, source, root, &[], None, &mut artifact)?;
@@ -42,7 +43,6 @@ fn definitions(
                 qualified_name.push(name.to_owned());
             }
             qualified_name.push(name.to_owned());
-            let caller = artifact.symbols.len();
             artifact.symbols.push(LocalSymbol {
                 key: SymbolKey {
                     language: Language::Rust,
@@ -57,8 +57,8 @@ fn definitions(
                     Export::Private
                 },
                 shape: shape(path, source, node)?,
+                steps: steps(path, source, body)?,
             });
-            calls(path, source, body, caller, &mut artifact.calls)?;
             return Ok(());
         }
         "impl_item" => {
@@ -107,23 +107,127 @@ fn definitions(
     Ok(())
 }
 
-fn calls(
+fn steps(path: &str, source: &str, node: Node<'_>) -> Result<Vec<LocalStep>, AnalyzeError> {
+    let mut output = Vec::new();
+    collect_steps(path, source, node, &mut output)?;
+    Ok(output)
+}
+
+fn collect_steps(
     path: &str,
     source: &str,
     node: Node<'_>,
-    caller: usize,
-    output: &mut Vec<CallSite>,
+    output: &mut Vec<LocalStep>,
 ) -> Result<(), AnalyzeError> {
-    if matches!(node.kind(), "function_item" | "impl_item" | "mod_item") {
+    if matches!(
+        node.kind(),
+        "function_item" | "closure_expression" | "impl_item" | "mod_item"
+    ) {
         return Ok(());
     }
-    if node.kind() == "call_expression" {
-        collect_call(path, source, node, caller, output)?;
+    if node.kind() == "if_expression" {
+        collect_if(path, source, node, false, output)?;
+        return Ok(());
+    }
+    if node.kind() == "match_expression" {
+        collect_match(path, source, node, output)?;
+        return Ok(());
+    }
+    if node.kind() == "call_expression"
+        && let Some(call) = collect_call(path, source, node)?
+    {
+        output.push(LocalStep::Call(call));
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        calls(path, source, child, caller, output)?;
+        collect_steps(path, source, child, output)?;
+    }
+    Ok(())
+}
+
+fn collect_if(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    else_if: bool,
+    output: &mut Vec<LocalStep>,
+) -> Result<(), AnalyzeError> {
+    let condition =
+        node.child_by_field_name("condition")
+            .ok_or_else(|| AnalyzeError::Unsupported {
+                path: path.to_owned(),
+                message: "if expression has no condition".to_owned(),
+            })?;
+    collect_steps(path, source, condition, output)?;
+    let condition_text = compact(text(path, source, condition)?);
+    let kind = if else_if { "else-if" } else { "if" };
+    let label = if else_if { "else if" } else { "if" };
+    let consequence =
+        node.child_by_field_name("consequence")
+            .ok_or_else(|| AnalyzeError::Unsupported {
+                path: path.to_owned(),
+                message: "if expression has no consequence".to_owned(),
+            })?;
+    output.push(LocalStep::Branch {
+        key: format!("{kind}:{condition_text}"),
+        label: format!("{label} {condition_text}"),
+        location: range(condition),
+        children: steps(path, source, consequence)?,
+    });
+
+    let Some(alternative) = node.child_by_field_name("alternative") else {
+        return Ok(());
+    };
+    let Some(inner) = first_named(alternative) else {
+        return Ok(());
+    };
+    if inner.kind() == "if_expression" {
+        collect_if(path, source, inner, true, output)?;
+    } else {
+        output.push(LocalStep::Branch {
+            key: "else".to_owned(),
+            label: "else".to_owned(),
+            location: range(alternative),
+            children: steps(path, source, inner)?,
+        });
+    }
+    Ok(())
+}
+
+fn collect_match(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut Vec<LocalStep>,
+) -> Result<(), AnalyzeError> {
+    if let Some(value) = node.child_by_field_name("value") {
+        collect_steps(path, source, value, output)?;
+    }
+    let Some(body) = node.child_by_field_name("body") else {
+        return Ok(());
+    };
+    let mut cursor = body.walk();
+    for arm in body.named_children(&mut cursor) {
+        if arm.kind() != "match_arm" {
+            continue;
+        }
+        let Some(pattern) = arm.child_by_field_name("pattern") else {
+            continue;
+        };
+        let Some(value) = arm.child_by_field_name("value") else {
+            continue;
+        };
+        if let Some(condition) = pattern.child_by_field_name("condition") {
+            collect_steps(path, source, condition, output)?;
+        }
+        let pattern_text = compact(text(path, source, pattern)?);
+        output.push(LocalStep::Branch {
+            key: format!("case:{pattern_text}"),
+            label: format!("case {pattern_text}"),
+            location: range(pattern),
+            children: steps(path, source, value)?,
+        });
     }
     Ok(())
 }
@@ -132,22 +236,17 @@ fn collect_call(
     path: &str,
     source: &str,
     node: Node<'_>,
-    caller: usize,
-    output: &mut Vec<CallSite>,
-) -> Result<(), AnalyzeError> {
+) -> Result<Option<CallSite>, AnalyzeError> {
     let Some(function) = node.child_by_field_name("function") else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(target) = call_target(path, source, function)? else {
-        return Ok(());
+        return Ok(None);
     };
-    output.push(CallSite {
-        caller,
+    Ok(Some(CallSite {
         target,
         location: range(node),
-        order: node.start_byte() as u32,
-    });
-    Ok(())
+    }))
 }
 
 fn call_target(

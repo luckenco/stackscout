@@ -1,0 +1,14 @@
+~ rust:lib.rs::handle
+    if status == 1
+    else if status == 2
+      rust:lib.rs::do_b
++     rust:lib.rs::do_extra
+    else
+    case 3
+      rust:lib.rs::do_three
++     rust:lib.rs::do_match_extra
+~   rust:lib.rs::guard
+      rust:lib.rs::old_guard_step
++     rust:lib.rs::new_guard_step
+    case 4 if guard()
+    case _

@@ -10,3 +10,17 @@ export function local() {
   const work = () => 3;
   return work();
 }
+
+export function make(Worker: new () => unknown) {
+  return new Worker();
+}
+
+class Worker {
+  constructor() {
+    oldStep();
+    newStep();
+  }
+}
+
+function oldStep() {}
+function newStep() {}

@@ -1,1 +1,3 @@
-! incomplete (unchanged; omitted from both): syntax error in index.ts near line 1
+~ ts:index.ts::run
+-   ts:index.ts::old_step
++   ts:index.ts::new_step

@@ -87,7 +87,7 @@ impl Analyzers {
         let (language, parser) = match Path::new(path).extension().and_then(|value| value.to_str())
         {
             Some("rs") => (Language::Rust, &mut self.rust),
-            Some("ts") => (Language::TypeScript, &mut self.typescript),
+            Some("ts" | "mts" | "cts") => (Language::TypeScript, &mut self.typescript),
             Some("tsx") => (Language::TypeScript, &mut self.tsx),
             _ => unreachable!("discovery only returns supported extensions"),
         };
@@ -95,13 +95,12 @@ impl Analyzers {
         let tree = parser
             .parse(source, None)
             .ok_or_else(|| AnalyzeError::Rejected(path.to_owned()))?;
-        if tree.root_node().has_error() {
-            let line = first_error(tree.root_node())
-                .map(|node| node.start_position().row + 1)
-                .unwrap_or(1);
+        if tree.root_node().has_error()
+            && let Some(error) = first_error(tree.root_node(), source, language)
+        {
             return Err(AnalyzeError::Syntax {
                 path: path.to_owned(),
-                line,
+                line: error.start_position().row + 1,
             });
         }
 
@@ -123,12 +122,26 @@ fn parser(name: &'static str, language: tree_sitter::Language) -> Result<Parser,
     Ok(parser)
 }
 
-fn first_error(node: Node<'_>) -> Option<Node<'_>> {
-    if node.is_error() || node.is_missing() {
+fn first_error<'tree>(node: Node<'tree>, source: &str, language: Language) -> Option<Node<'tree>> {
+    if (node.is_error() || node.is_missing()) && !known_typescript_error(node, source, language) {
         return Some(node);
     }
     let mut cursor = node.walk();
-    node.children(&mut cursor).find_map(first_error)
+    node.children(&mut cursor)
+        .find_map(|child| first_error(child, source, language))
+}
+
+fn known_typescript_error(node: Node<'_>, source: &str, language: Language) -> bool {
+    if language != Language::TypeScript || !node.is_error() {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    parent.kind() == "export_statement"
+        && node
+            .utf8_text(source.as_bytes())
+            .is_ok_and(|value| value == "type")
 }
 
 pub(super) fn text<'a>(
@@ -138,6 +151,15 @@ pub(super) fn text<'a>(
 ) -> Result<&'a str, AnalyzeError> {
     node.utf8_text(source.as_bytes())
         .map_err(|_| AnalyzeError::InvalidNode(path.to_owned()))
+}
+
+pub(super) fn first_named(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).next()
+}
+
+pub(super) fn compact(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(super) fn range(node: Node<'_>) -> SourceRange {

@@ -1,1 +1,7 @@
+~ ts:main.ts::Worker::constructor
+    ts:main.ts::oldStep
++   ts:main.ts::newStep
+
++ ts:main.ts::newStep
+
 ~ ts:main.ts::work

@@ -1,0 +1,7 @@
+~ ts:main.mts::esm
+-   ts:main.mts::old_esm
++   ts:main.mts::new_esm
+
+~ ts:worker.cts::common
+-   ts:worker.cts::old_common
++   ts:worker.cts::new_common

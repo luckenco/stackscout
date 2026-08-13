@@ -24,9 +24,17 @@ pub(crate) fn sources(root: &Path) -> Result<Vec<PathBuf>, DiscoverError> {
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
+            continue;
+        }
         if matches!(
-            entry.path().extension().and_then(|value| value.to_str()),
-            Some("rs" | "ts" | "tsx")
+            path.extension().and_then(|value| value.to_str()),
+            Some("rs" | "ts" | "tsx" | "mts" | "cts")
         ) {
             paths.push(entry.into_path());
         }

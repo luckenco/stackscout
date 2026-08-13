@@ -36,7 +36,7 @@ impl From<graph::GraphError> for Error {
 
 /// Compares two source directories and returns a deterministic semantic graph diff.
 ///
-/// The supported file extensions are `.rs`, `.ts`, and `.tsx`. If a file cannot
+/// The supported file extensions are `.rs`, `.ts`, `.tsx`, `.mts`, and `.cts`. If a file cannot
 /// be analyzed in either directory, that path is omitted from both graphs and
 /// the output begins with deterministic `! incomplete` diagnostics. Diagnostics
 /// are classified as introduced, resolved, changed, or unchanged.

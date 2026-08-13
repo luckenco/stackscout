@@ -2,25 +2,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
-use crate::model::{Export, LocalSymbol, Resolution, ResolvedCall, ResolvedProgram, SymbolKey};
+use crate::model::{Export, LocalSymbol, Resolution, ResolvedProgram, ResolvedStep, SymbolKey};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocalShape {
     pub(crate) export: Export,
     pub(crate) syntax: String,
-    pub(crate) calls: Vec<String>,
+    pub(crate) steps: Vec<String>,
 }
 
 impl LocalShape {
     pub(crate) fn fingerprint(&self) -> String {
-        format!("{:?}\n{}\n{:?}", self.export, self.syntax, self.calls)
+        format!("{:?}\n{}\n{:?}", self.export, self.syntax, self.steps)
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct GraphNode {
     pub(crate) symbol: LocalSymbol,
-    pub(crate) calls: Vec<ResolvedCall>,
+    pub(crate) steps: Vec<ResolvedStep>,
 }
 
 impl GraphNode {
@@ -28,11 +28,7 @@ impl GraphNode {
         LocalShape {
             export: self.symbol.export,
             syntax: self.symbol.shape.clone(),
-            calls: self
-                .calls
-                .iter()
-                .map(|call| call.resolution.identity())
-                .collect(),
+            steps: self.steps.iter().map(step_identity).collect(),
         }
     }
 }
@@ -57,7 +53,7 @@ pub(crate) fn build(program: ResolvedProgram) -> Result<Graph, GraphError> {
         let key = resolved.symbol.key.clone();
         let node = GraphNode {
             symbol: resolved.symbol,
-            calls: resolved.calls,
+            steps: resolved.steps,
         };
         if symbols.insert(key.clone(), node).is_some() {
             return Err(GraphError::Duplicate(key));
@@ -65,8 +61,20 @@ pub(crate) fn build(program: ResolvedProgram) -> Result<Graph, GraphError> {
     }
 
     for (caller, node) in &symbols {
-        for call in &node.calls {
-            match &call.resolution {
+        add_incoming(caller, &node.steps, &mut incoming);
+    }
+
+    Ok(Graph { symbols, incoming })
+}
+
+fn add_incoming(
+    caller: &SymbolKey,
+    steps: &[ResolvedStep],
+    incoming: &mut BTreeMap<SymbolKey, BTreeSet<SymbolKey>>,
+) {
+    for step in steps {
+        match step {
+            ResolvedStep::Call(call) => match &call.resolution {
                 Resolution::Resolved(callee) => {
                     incoming
                         .entry(callee.clone())
@@ -82,9 +90,22 @@ pub(crate) fn build(program: ResolvedProgram) -> Result<Graph, GraphError> {
                     }
                 }
                 Resolution::Unresolved(_) => {}
-            }
+            },
+            ResolvedStep::Branch { children, .. } => add_incoming(caller, children, incoming),
         }
     }
+}
 
-    Ok(Graph { symbols, incoming })
+fn step_identity(step: &ResolvedStep) -> String {
+    match step {
+        ResolvedStep::Call(call) => call.resolution.identity(),
+        ResolvedStep::Branch { key, children, .. } => {
+            let children = children
+                .iter()
+                .map(step_identity)
+                .collect::<Vec<_>>()
+                .join("\0");
+            format!("#{key}[{children}]")
+        }
+    }
 }

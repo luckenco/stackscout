@@ -1,0 +1,7 @@
+~ rust:lib.rs::rust_outer
+    rust:lib.rs::visible_rust
++   rust:lib.rs::visible_rust_extra
+
+~ ts:main.ts::tsOuter
+    ts:main.ts::visibleTs
++   ts:main.ts::visibleTsExtra

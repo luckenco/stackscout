@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::model::{
-    CallTarget, FileArtifact, Import, ImportTarget, Language, LocalSymbol, Resolution,
-    ResolvedCall, ResolvedProgram, ResolvedSymbol, SymbolKey,
+    CallTarget, FileArtifact, Import, ImportTarget, Language, LocalStep, LocalSymbol, Resolution,
+    ResolvedCall, ResolvedProgram, ResolvedStep, ResolvedSymbol, SymbolKey,
 };
 
 pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
@@ -18,37 +18,50 @@ pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
 
     let mut symbols = Vec::new();
     for artifact in artifacts {
-        let mut calls_by_caller = BTreeMap::<usize, Vec<ResolvedCall>>::new();
-        for call in &artifact.calls {
-            let caller = &artifact.symbols[call.caller];
-            let resolution = target(
-                caller,
-                &call.target,
-                artifact.language,
-                imports.get(artifact.path.as_str()).copied().unwrap_or(&[]),
-                &all_symbols,
-            );
-            calls_by_caller
-                .entry(call.caller)
-                .or_default()
-                .push(ResolvedCall {
-                    resolution,
-                    location: call.location.clone(),
-                    order: call.order,
-                });
-        }
-
-        for (index, symbol) in artifact.symbols.iter().enumerate() {
-            let mut calls = calls_by_caller.remove(&index).unwrap_or_default();
-            calls.sort_by_key(|call| call.order);
+        for symbol in &artifact.symbols {
             symbols.push(ResolvedSymbol {
                 symbol: symbol.clone(),
-                calls,
+                steps: resolve_steps(
+                    &symbol.steps,
+                    symbol,
+                    artifact.language,
+                    imports.get(artifact.path.as_str()).copied().unwrap_or(&[]),
+                    &all_symbols,
+                ),
             });
         }
     }
     symbols.sort_by(|left, right| left.symbol.key.cmp(&right.symbol.key));
     ResolvedProgram { symbols }
+}
+
+fn resolve_steps(
+    steps: &[LocalStep],
+    caller: &LocalSymbol,
+    language: Language,
+    imports: &[Import],
+    symbols: &[&LocalSymbol],
+) -> Vec<ResolvedStep> {
+    steps
+        .iter()
+        .map(|step| match step {
+            LocalStep::Call(call) => ResolvedStep::Call(ResolvedCall {
+                resolution: target(caller, &call.target, language, imports, symbols),
+                location: call.location.clone(),
+            }),
+            LocalStep::Branch {
+                key,
+                label,
+                location,
+                children,
+            } => ResolvedStep::Branch {
+                key: key.clone(),
+                label: label.clone(),
+                location: location.clone(),
+                children: resolve_steps(children, caller, language, imports, symbols),
+            },
+        })
+        .collect()
 }
 
 fn target(
@@ -109,6 +122,35 @@ fn target(
             }
             if language == Language::Rust {
                 rust_path(caller, path, symbols, &mut candidates);
+            }
+        }
+        CallTarget::Constructor(path) => {
+            let mut qualified = path.clone();
+            qualified.push("constructor".to_owned());
+            same_file(&caller.key, &qualified, symbols, &mut candidates);
+            if let Some((local, rest)) = path.split_first() {
+                for import in imports.iter().filter(|import| import.local == *local) {
+                    match &import.target {
+                        ImportTarget::Named(imported) => {
+                            let mut target = vec![imported.clone()];
+                            target.extend_from_slice(rest);
+                            target.push("constructor".to_owned());
+                            imported_symbol(&caller.key, import, &target, symbols, &mut candidates);
+                        }
+                        ImportTarget::Namespace => {
+                            let mut target = rest.to_vec();
+                            target.push("constructor".to_owned());
+                            imported_symbol(&caller.key, import, &target, symbols, &mut candidates);
+                        }
+                        ImportTarget::Default if rest.is_empty() => imported_default_constructor(
+                            &caller.key,
+                            import,
+                            symbols,
+                            &mut candidates,
+                        ),
+                        ImportTarget::Default => {}
+                    }
+                }
             }
         }
     }
@@ -181,6 +223,30 @@ fn imported_default(
     );
 }
 
+fn imported_default_constructor(
+    caller: &SymbolKey,
+    import: &Import,
+    symbols: &[&LocalSymbol],
+    output: &mut BTreeSet<SymbolKey>,
+) {
+    let files = import_files(&caller.file, &import.source);
+    output.extend(
+        symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.key.language == caller.language
+                    && files.contains(&symbol.key.file)
+                    && symbol.export == crate::model::Export::Default
+                    && symbol
+                        .key
+                        .qualified_name
+                        .last()
+                        .is_some_and(|name| name == "constructor")
+            })
+            .map(|symbol| symbol.key.clone()),
+    );
+}
+
 fn import_files(caller: &str, source: &str) -> BTreeSet<String> {
     if !source.starts_with('.') {
         return BTreeSet::new();
@@ -188,14 +254,31 @@ fn import_files(caller: &str, source: &str) -> BTreeSet<String> {
     let parent = Path::new(caller).parent().unwrap_or_else(|| Path::new(""));
     let path = clean(parent.join(source));
     let base = path.to_string_lossy().replace('\\', "/");
-    if path.extension().is_some() {
-        return BTreeSet::from([base]);
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        let mut files = BTreeSet::from([base]);
+        let replacements: &[&str] = match extension {
+            "js" => &["ts", "tsx"],
+            "jsx" => &["tsx"],
+            "mjs" => &["mts"],
+            "cjs" => &["cts"],
+            _ => &[],
+        };
+        for extension in replacements {
+            let mut candidate = path.clone();
+            candidate.set_extension(extension);
+            files.insert(candidate.to_string_lossy().replace('\\', "/"));
+        }
+        return files;
     }
     BTreeSet::from([
         format!("{base}.ts"),
         format!("{base}.tsx"),
+        format!("{base}.mts"),
+        format!("{base}.cts"),
         format!("{base}/index.ts"),
         format!("{base}/index.tsx"),
+        format!("{base}/index.mts"),
+        format!("{base}/index.cts"),
     ])
 }
 

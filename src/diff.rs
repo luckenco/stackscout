@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::graph::{Graph, LocalShape};
-use crate::model::{Resolution, SourceRange, SymbolKey};
+use crate::model::{Resolution, ResolvedStep, SourceRange, SymbolKey};
 
 const MAX_DEPTH: usize = 32;
 const MAX_NODES: usize = 10_000;
@@ -168,76 +168,101 @@ fn expand(
         children: Vec::new(),
     };
     if depth >= MAX_DEPTH || *nodes >= MAX_NODES {
-        output.children.push(TreeNode {
-            identity: "[truncated]".to_owned(),
-            label: "[truncated]".to_owned(),
-            location: None,
-            local_shape: None,
-            children: Vec::new(),
-        });
+        output.children.push(truncated());
         return output;
     }
 
     path.insert(key.clone());
-    for call in &node.calls {
+    output.children = expand_steps(graph, &node.steps, depth, nodes, path);
+    path.remove(key);
+    output
+}
+
+fn expand_steps(
+    graph: &Graph,
+    steps: &[ResolvedStep],
+    depth: usize,
+    nodes: &mut usize,
+    path: &mut BTreeSet<SymbolKey>,
+) -> Vec<TreeNode> {
+    let mut output = Vec::new();
+    for step in steps {
         if *nodes >= MAX_NODES {
-            output.children.push(TreeNode {
-                identity: "[truncated]".to_owned(),
-                label: "[truncated]".to_owned(),
-                location: None,
-                local_shape: None,
-                children: Vec::new(),
-            });
+            output.push(truncated());
             break;
         }
-        match &call.resolution {
-            Resolution::Resolved(callee) if path.contains(callee) => {
+        match step {
+            ResolvedStep::Branch {
+                key,
+                label,
+                location,
+                children,
+            } => {
                 *nodes += 1;
-                output.children.push(TreeNode {
-                    identity: callee.to_string(),
-                    label: format!("{callee} [cycle]"),
-                    location: Some(call.location.clone()),
+                output.push(TreeNode {
+                    identity: format!("[branch:{key}]"),
+                    label: label.clone(),
+                    location: Some(location.clone()),
                     local_shape: None,
-                    children: Vec::new(),
+                    children: expand_steps(graph, children, depth, nodes, path),
                 });
             }
-            Resolution::Resolved(callee) => {
-                output.children.push(expand(
+            ResolvedStep::Call(call) => match &call.resolution {
+                Resolution::Resolved(callee) if path.contains(callee) => {
+                    *nodes += 1;
+                    output.push(TreeNode {
+                        identity: callee.to_string(),
+                        label: format!("{callee} [cycle]"),
+                        location: Some(call.location.clone()),
+                        local_shape: None,
+                        children: Vec::new(),
+                    });
+                }
+                Resolution::Resolved(callee) => output.push(expand(
                     graph,
                     callee,
                     call.location.clone(),
                     depth + 1,
                     nodes,
                     path,
-                ));
-            }
-            Resolution::Unresolved(target) => {
-                *nodes += 1;
-                output.children.push(TreeNode {
-                    identity: call.resolution.identity(),
-                    label: format!("[unresolved: {target}]"),
-                    location: Some(call.location.clone()),
-                    local_shape: None,
-                    children: Vec::new(),
-                });
-            }
-            Resolution::Ambiguous { target, candidates } => {
-                *nodes += 1;
-                let candidates = candidates
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                output.children.push(TreeNode {
-                    identity: call.resolution.identity(),
-                    label: format!("[ambiguous: {target} -> {candidates}]"),
-                    location: Some(call.location.clone()),
-                    local_shape: None,
-                    children: Vec::new(),
-                });
-            }
+                )),
+                Resolution::Unresolved(target) => {
+                    *nodes += 1;
+                    output.push(TreeNode {
+                        identity: call.resolution.identity(),
+                        label: format!("[unresolved: {target}]"),
+                        location: Some(call.location.clone()),
+                        local_shape: None,
+                        children: Vec::new(),
+                    });
+                }
+                Resolution::Ambiguous { target, candidates } => {
+                    *nodes += 1;
+                    let candidates = candidates
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    output.push(TreeNode {
+                        identity: call.resolution.identity(),
+                        label: format!("[ambiguous: {target} -> {candidates}]"),
+                        location: Some(call.location.clone()),
+                        local_shape: None,
+                        children: Vec::new(),
+                    });
+                }
+            },
         }
     }
-    path.remove(key);
     output
+}
+
+fn truncated() -> TreeNode {
+    TreeNode {
+        identity: "[truncated]".to_owned(),
+        label: "[truncated]".to_owned(),
+        location: None,
+        local_shape: None,
+        children: Vec::new(),
+    }
 }

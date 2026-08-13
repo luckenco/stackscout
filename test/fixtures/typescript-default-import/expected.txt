@@ -1,3 +1,8 @@
+  ts:main.ts::make
+~   ts:worker.ts::Worker::constructor
+-     ts:worker.ts::oldStep
++     ts:worker.ts::newStep
+
   ts:main.ts::run
 ~   ts:dep.ts::work
 -     ts:dep.ts::oldStep

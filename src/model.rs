@@ -54,6 +54,8 @@ pub(crate) enum CallTarget {
     SelfAssociated(String),
     /// A qualified call such as `store.work()` or `crate::store::work()`.
     Path(Vec<String>),
+    /// A TypeScript constructor call such as `new Worker()`.
+    Constructor(Vec<String>),
     /// A bare TypeScript call shadowed by a parameter or local binding.
     Bound(String),
 }
@@ -66,6 +68,7 @@ impl fmt::Display for CallTarget {
             Self::SelfMethod(name) => write!(f, "self.{name}"),
             Self::SelfAssociated(name) => write!(f, "Self::{name}"),
             Self::Path(path) => f.write_str(&path.join("::")),
+            Self::Constructor(path) => write!(f, "new {}", path.join(".")),
             Self::Bound(name) => f.write_str(name),
         }
     }
@@ -105,14 +108,24 @@ pub(crate) struct LocalSymbol {
     pub(crate) location: SourceRange,
     pub(crate) export: Export,
     pub(crate) shape: String,
+    pub(crate) steps: Vec<LocalStep>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CallSite {
-    pub(crate) caller: usize,
     pub(crate) target: CallTarget,
     pub(crate) location: SourceRange,
-    pub(crate) order: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalStep {
+    Call(CallSite),
+    Branch {
+        key: String,
+        label: String,
+        location: SourceRange,
+        children: Vec<LocalStep>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,7 +133,6 @@ pub(crate) struct FileArtifact {
     pub(crate) language: Language,
     pub(crate) path: String,
     pub(crate) symbols: Vec<LocalSymbol>,
-    pub(crate) calls: Vec<CallSite>,
     pub(crate) imports: Vec<Import>,
 }
 
@@ -155,13 +167,23 @@ impl Resolution {
 pub(crate) struct ResolvedCall {
     pub(crate) resolution: Resolution,
     pub(crate) location: SourceRange,
-    pub(crate) order: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ResolvedStep {
+    Call(ResolvedCall),
+    Branch {
+        key: String,
+        label: String,
+        location: SourceRange,
+        children: Vec<ResolvedStep>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedSymbol {
     pub(crate) symbol: LocalSymbol,
-    pub(crate) calls: Vec<ResolvedCall>,
+    pub(crate) steps: Vec<ResolvedStep>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

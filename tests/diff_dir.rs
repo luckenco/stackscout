@@ -99,13 +99,39 @@ fn typescript_export_changes_are_semantic() {
 }
 
 #[test]
-fn typescript_type_star_export_tracks_upstream_grammar_gap() {
+fn typescript_type_star_export_does_not_omit_the_file() {
     fixture("typescript-type-star-export");
 }
 
 #[test]
 fn typescript_default_imports_propagate_changes() {
     fixture("typescript-default-import");
+}
+
+#[test]
+fn typescript_callable_forms_propagate_changes() {
+    fixture("typescript-callables");
+}
+
+#[test]
+fn typescript_module_extensions_are_discovered() {
+    fixture("module-extensions");
+}
+
+#[test]
+fn typescript_branches_preserve_call_context() {
+    fixture("typescript-branches");
+}
+
+#[test]
+fn rust_branches_preserve_call_context() {
+    fixture("rust-branches");
+}
+
+#[test]
+fn closures_do_not_contribute_calls_to_their_parent() {
+    let output = fixture("closure-ownership");
+    assert!(!output.contains("hidden"));
 }
 
 #[test]

@@ -1,0 +1,6 @@
+~ ts:main.ts::handle
+    if (status === "a")
+    else if (status === "b")
+      ts:main.ts::do_b
++     ts:main.ts::do_extra
+    else

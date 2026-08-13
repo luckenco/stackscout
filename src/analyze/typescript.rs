@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use tree_sitter::Node;
 
-use super::{AnalyzeError, range, shape, text};
+use super::{AnalyzeError, compact, first_named, range, shape, text};
 use crate::model::{
-    CallSite, CallTarget, Export, FileArtifact, Import, ImportTarget, Language, LocalSymbol,
-    SymbolKey,
+    CallSite, CallTarget, Export, FileArtifact, Import, ImportTarget, Language, LocalStep,
+    LocalSymbol, SymbolKey,
 };
 
 pub(super) fn extract(
@@ -17,7 +17,6 @@ pub(super) fn extract(
         language: Language::TypeScript,
         path: path.to_owned(),
         symbols: Vec::new(),
-        calls: Vec::new(),
         imports: Vec::new(),
     };
     imports(path, source, root, &mut artifact.imports)?;
@@ -118,38 +117,98 @@ fn definitions(
     source: &str,
     node: Node<'_>,
     class_name: Option<&str>,
-    class_export: Export,
+    inherited_export: Export,
     artifact: &mut FileArtifact,
 ) -> Result<(), AnalyzeError> {
     match node.kind() {
-        "function_declaration" => {
-            add_function(
-                path,
-                source,
-                node,
-                None,
-                export(path, source, node)?,
-                artifact,
-            )?;
+        "export_statement" => {
+            let export = if text(path, source, node)?.starts_with("export default") {
+                Export::Default
+            } else {
+                Export::Named
+            };
+            if let Some(value) = node.child_by_field_name("value")
+                && is_function_value(value)
+            {
+                add_function(path, source, value, Some("default"), None, export, artifact)?;
+                return Ok(());
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                definitions(path, source, child, class_name, export, artifact)?;
+            }
+            return Ok(());
+        }
+        "function_declaration" | "generator_function_declaration" => {
+            add_function(path, source, node, None, None, inherited_export, artifact)?;
+            return Ok(());
+        }
+        "variable_declarator" => {
+            let Some(name) = node.child_by_field_name("name") else {
+                return Ok(());
+            };
+            let Some(value) = node.child_by_field_name("value") else {
+                return Ok(());
+            };
+            if name.kind() == "identifier" && is_function_value(value) {
+                add_function(
+                    path,
+                    source,
+                    value,
+                    Some(text(path, source, name)?),
+                    class_name,
+                    inherited_export,
+                    artifact,
+                )?;
+            }
             return Ok(());
         }
         "method_definition" => {
             if class_name.is_some() && !is_accessor(node) {
-                add_function(path, source, node, class_name, class_export, artifact)?;
+                add_function(
+                    path,
+                    source,
+                    node,
+                    None,
+                    class_name,
+                    inherited_export,
+                    artifact,
+                )?;
             }
             return Ok(());
         }
-        "class_declaration" => {
+        "public_field_definition" => {
+            let (Some(class_name), Some(name), Some(value)) = (
+                class_name,
+                node.child_by_field_name("name"),
+                node.child_by_field_name("value"),
+            ) else {
+                return Ok(());
+            };
+            if !matches!(
+                name.kind(),
+                "property_identifier" | "private_property_identifier"
+            ) || !is_function_value(value)
+            {
+                return Ok(());
+            }
+            add_function(
+                path,
+                source,
+                value,
+                Some(text(path, source, name)?),
+                Some(class_name),
+                inherited_export,
+                artifact,
+            )?;
+            return Ok(());
+        }
+        "class_declaration" | "abstract_class_declaration" => {
             let Some(name_node) = node.child_by_field_name("name") else {
                 return Ok(());
             };
             let name = text(path, source, name_node)?;
-            let class_export = export(path, source, node)?;
-            let method_export = if class_export.is_public() {
-                Export::Named
-            } else {
-                Export::Private
-            };
+            let method_export = inherited_export;
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
@@ -158,12 +217,13 @@ fn definitions(
             }
             return Ok(());
         }
+        "arrow_function" | "function_expression" | "generator_function" => return Ok(()),
         _ => {}
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        definitions(path, source, child, class_name, class_export, artifact)?;
+        definitions(path, source, child, class_name, inherited_export, artifact)?;
     }
     Ok(())
 }
@@ -172,17 +232,22 @@ fn add_function(
     path: &str,
     source: &str,
     node: Node<'_>,
+    explicit_name: Option<&str>,
     class_name: Option<&str>,
     export: Export,
     artifact: &mut FileArtifact,
 ) -> Result<(), AnalyzeError> {
-    let name_node = node
-        .child_by_field_name("name")
-        .ok_or_else(|| AnalyzeError::Unsupported {
-            path: path.to_owned(),
-            message: format!("{} has no name", node.kind()),
-        })?;
-    let name = text(path, source, name_node)?;
+    let name = if let Some(name) = explicit_name {
+        name
+    } else {
+        let name_node =
+            node.child_by_field_name("name")
+                .ok_or_else(|| AnalyzeError::Unsupported {
+                    path: path.to_owned(),
+                    message: format!("{} has no name", node.kind()),
+                })?;
+        text(path, source, name_node)?
+    };
     let body = node
         .child_by_field_name("body")
         .ok_or_else(|| AnalyzeError::Unsupported {
@@ -194,7 +259,7 @@ fn add_function(
         qualified_name.push(class_name.to_owned());
     }
     qualified_name.push(name.to_owned());
-    let caller = artifact.symbols.len();
+    let bindings = bindings(path, source, node, body)?;
     artifact.symbols.push(LocalSymbol {
         key: SymbolKey {
             language: Language::TypeScript,
@@ -204,30 +269,100 @@ fn add_function(
         module: Vec::new(),
         location: range(node),
         export,
-        shape: shape(path, source, node)?,
+        shape: shape(path, source, definition_node(node))?,
+        steps: steps(path, source, body, &bindings)?,
     });
-    let bindings = bindings(path, source, node, body)?;
-    calls(path, source, body, caller, &bindings, &mut artifact.calls)
+    Ok(())
 }
 
-fn calls(
+fn steps(
     path: &str,
     source: &str,
     node: Node<'_>,
-    caller: usize,
     bindings: &BTreeSet<String>,
-    output: &mut Vec<CallSite>,
+) -> Result<Vec<LocalStep>, AnalyzeError> {
+    let mut output = Vec::new();
+    collect_steps(path, source, node, bindings, &mut output)?;
+    Ok(output)
+}
+
+fn collect_steps(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    bindings: &BTreeSet<String>,
+    output: &mut Vec<LocalStep>,
 ) -> Result<(), AnalyzeError> {
-    if matches!(node.kind(), "function_declaration" | "method_definition") {
+    if is_nested_function(node.kind()) {
+        return Ok(());
+    }
+    if node.kind() == "if_statement" {
+        collect_if(path, source, node, false, bindings, output)?;
         return Ok(());
     }
     if node.kind() == "call_expression" {
-        collect_call(path, source, node, caller, bindings, output)?;
+        if let Some(call) = collect_call(path, source, node, bindings)? {
+            output.push(LocalStep::Call(call));
+        }
+    } else if node.kind() == "new_expression"
+        && let Some(call) = collect_constructor(path, source, node, bindings)?
+    {
+        output.push(LocalStep::Call(call));
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        calls(path, source, child, caller, bindings, output)?;
+        collect_steps(path, source, child, bindings, output)?;
+    }
+    Ok(())
+}
+
+fn collect_if(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    else_if: bool,
+    bindings: &BTreeSet<String>,
+    output: &mut Vec<LocalStep>,
+) -> Result<(), AnalyzeError> {
+    let condition =
+        node.child_by_field_name("condition")
+            .ok_or_else(|| AnalyzeError::Unsupported {
+                path: path.to_owned(),
+                message: "if statement has no condition".to_owned(),
+            })?;
+    collect_steps(path, source, condition, bindings, output)?;
+    let condition_text = compact(text(path, source, condition)?);
+    let kind = if else_if { "else-if" } else { "if" };
+    let label = if else_if { "else if" } else { "if" };
+    let consequence =
+        node.child_by_field_name("consequence")
+            .ok_or_else(|| AnalyzeError::Unsupported {
+                path: path.to_owned(),
+                message: "if statement has no consequence".to_owned(),
+            })?;
+    output.push(LocalStep::Branch {
+        key: format!("{kind}:{condition_text}"),
+        label: format!("{label} {condition_text}"),
+        location: range(condition),
+        children: steps(path, source, consequence, bindings)?,
+    });
+
+    let Some(alternative) = node.child_by_field_name("alternative") else {
+        return Ok(());
+    };
+    let Some(inner) = first_named(alternative) else {
+        return Ok(());
+    };
+    if inner.kind() == "if_statement" {
+        collect_if(path, source, inner, true, bindings, output)?;
+    } else {
+        output.push(LocalStep::Branch {
+            key: "else".to_owned(),
+            label: "else".to_owned(),
+            location: range(alternative),
+            children: steps(path, source, inner, bindings)?,
+        });
     }
     Ok(())
 }
@@ -236,23 +371,41 @@ fn collect_call(
     path: &str,
     source: &str,
     node: Node<'_>,
-    caller: usize,
     bindings: &BTreeSet<String>,
-    output: &mut Vec<CallSite>,
-) -> Result<(), AnalyzeError> {
+) -> Result<Option<CallSite>, AnalyzeError> {
     let Some(function) = node.child_by_field_name("function") else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(target) = call_target(path, source, function, bindings)? else {
-        return Ok(());
+        return Ok(None);
     };
-    output.push(CallSite {
-        caller,
+    Ok(Some(CallSite {
         target,
         location: range(node),
-        order: node.start_byte() as u32,
-    });
-    Ok(())
+    }))
+}
+
+fn collect_constructor(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    bindings: &BTreeSet<String>,
+) -> Result<Option<CallSite>, AnalyzeError> {
+    let Some(constructor) = node.child_by_field_name("constructor") else {
+        return Ok(None);
+    };
+    let Some(parts) = target_parts(path, source, constructor)? else {
+        return Ok(None);
+    };
+    let target = if parts.len() == 1 && bindings.contains(&parts[0]) {
+        CallTarget::Bound(parts[0].clone())
+    } else {
+        CallTarget::Constructor(parts)
+    };
+    Ok(Some(CallSite {
+        target,
+        location: range(node),
+    }))
 }
 
 fn call_target(
@@ -289,6 +442,23 @@ fn call_target(
     }
 }
 
+fn target_parts(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+) -> Result<Option<Vec<String>>, AnalyzeError> {
+    match node.kind() {
+        "identifier" => Ok(Some(vec![text(path, source, node)?.to_owned()])),
+        "member_expression" => Ok(Some(
+            text(path, source, node)?
+                .split('.')
+                .map(str::to_owned)
+                .collect(),
+        )),
+        _ => Ok(None),
+    }
+}
+
 fn bindings(
     path: &str,
     source: &str,
@@ -298,6 +468,9 @@ fn bindings(
     let mut output = BTreeSet::new();
     if let Some(parameters) = function.child_by_field_name("parameters") {
         parameter_bindings(path, source, parameters, &mut output)?;
+    }
+    if let Some(parameter) = function.child_by_field_name("parameter") {
+        binding_names(path, source, parameter, &mut output)?;
     }
     local_bindings(path, source, body, &mut output)?;
     Ok(output)
@@ -316,6 +489,10 @@ fn parameter_bindings(
         {
             binding_names(path, source, binding, output)?;
         }
+        return Ok(());
+    }
+    if matches!(node.kind(), "identifier" | "rest_pattern") {
+        binding_names(path, source, node, output)?;
         return Ok(());
     }
     let mut cursor = node.walk();
@@ -338,13 +515,15 @@ fn local_bindings(
             }
             return Ok(());
         }
-        "function_declaration" | "class_declaration" => {
+        "function_declaration" | "generator_function_declaration" | "class_declaration" => {
             if let Some(name) = node.child_by_field_name("name") {
                 binding_names(path, source, name, output)?;
             }
             return Ok(());
         }
-        "arrow_function" | "function_expression" | "method_definition" => return Ok(()),
+        "arrow_function" | "function_expression" | "generator_function" | "method_definition" => {
+            return Ok(());
+        }
         "catch_clause" => {
             if let Some(parameter) = node.child_by_field_name("parameter") {
                 binding_names(path, source, parameter, output)?;
@@ -379,21 +558,38 @@ fn binding_names(
     Ok(())
 }
 
+fn definition_node(node: Node<'_>) -> Node<'_> {
+    node.parent()
+        .filter(|parent| {
+            matches!(
+                parent.kind(),
+                "variable_declarator" | "public_field_definition" | "export_statement"
+            )
+        })
+        .unwrap_or(node)
+}
+
+fn is_function_value(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "generator_function"
+    )
+}
+
+fn is_nested_function(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_declaration"
+            | "generator_function_declaration"
+            | "arrow_function"
+            | "function_expression"
+            | "generator_function"
+            | "method_definition"
+    )
+}
+
 fn is_accessor(node: Node<'_>) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .any(|child| matches!(child.kind(), "get" | "set"))
-}
-
-fn export(path: &str, source: &str, node: Node<'_>) -> Result<Export, AnalyzeError> {
-    let Some(parent) = node.parent() else {
-        return Ok(Export::Private);
-    };
-    if parent.kind() != "export_statement" {
-        return Ok(Export::Private);
-    }
-    if text(path, source, parent)?.starts_with("export default") {
-        return Ok(Export::Default);
-    }
-    Ok(Export::Named)
 }
