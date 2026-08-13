@@ -2,6 +2,7 @@
 name = "stackscout"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 ignore = "0.4"

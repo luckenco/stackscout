@@ -1,0 +1,72 @@
+# stackscout
+
+stackscout is an experiment in giving coding agents an incremental view of how code is
+changing.
+
+It is heavily inspired by
+[Dillon Mulroy's](https://x.com/dillon_mulroy/status/2069852516309762411?s=20) suggestion of asking
+your coding agenst for callstacks.
+
+This works really well for me, since I've incorporated it in my workflow.
+
+## Vision
+
+[fff](https://github.com/dmtrKovalenko/fff) keeps a fast local repository index available to coding
+agents. The idea here is to do something similar for call graphs and changes over time.
+
+In a repo worked on by several coding agents, each agent is a different head of the same hydra.
+StackScout could let one head see what another head changed, and which callers or entrypoints that
+change affects, without re-reading and re-ingesting the whole file. A shared index could answer
+questions such as:
+
+- What call paths changed since this agent started?
+- What is another agent changing in this repo right now?
+- Did two agents change overlapping parts of the graph?
+
+StackScout may help with this workflow, or simply provide a faster way to inspect call stacks.
+
+## What it does today
+
+StackScout is currently a one-shot directory diff for Rust and TypeScript. It:
+
+- parses `.rs`, `.ts`, `.tsx`, `.mts`, and `.cts` files with Tree-sitter;
+- builds a static call graph for each directory;
+- compares the graphs and traces changes back to affected public or exported callers;
+- preserves call order and branch context; and
+- reports unresolved or ambiguous calls instead of guessing.
+
+```sh
+stackscout diff-dir <before-directory> <after-directory>
+```
+
+For example, adding an `audit` call inside `save` can produce:
+
+```text
+  ts:api.ts::create
+~   ts:store.ts::save
++     ts:store.ts::audit
+      ts:store.ts::insert
+```
+
+## What it does not do
+
+StackScout is an early prototype. It does **not** currently:
+
+- keep a daemon or shared repository index running;
+- update its graph incrementally when a file changes;
+- know about concurrent coding-agent sessions;
+- let one agent inspect another agent's live changes;
+- provide checkpoints, session-start diffs, or VCS revision lookup;
+- expose MCP, editor, or coding-agent integrations;
+- avoid rescanning both directories on every run;
+- support languages other than Rust and TypeScript; or
+- provide compiler- or typechecker-complete call resolution.
+
+The graph is conservative and syntactic. Dynamic dispatch, reflection, Rust macro expansion,
+TypeScript type-driven method resolution, generated code, and calls outside the compared trees may
+remain unresolved. Parse failures are reported as incomplete rather than presented as trustworthy
+results.
+
+## License
+
+[MIT](LICENSE)
