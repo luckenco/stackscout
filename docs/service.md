@@ -189,7 +189,7 @@ there is no shutdown operation or idle expiry. Stop the foreground owner or PID 
   the writer. Sustained overload has no fairness/latency guarantee.
 - Updates rebuild global edges; staging/publication clone maps/snapshots. Retained checkpoints
   cost memory. Diff bytes are capped **after rendering**, so expansion/allocation remain unbounded
-  by that byte cap. See [measurements](performance.md#service-smoke-measurement) before optimizing.
+  by that byte cap. See [measurements](performance.md#service-evaluation) before optimizing.
 
 Run the [README checks](../README.md#checks) on Linux and macOS. Coverage includes serial/parallel
 fixture replay, atomic failures, watcher reconciliation/recovery, startup/crash/long-path ownership,

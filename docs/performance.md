@@ -31,9 +31,54 @@ This regenerates the in-memory corpus; run the same module on the baseline for c
 CLI scratch runners were temporary. No cold-disk/Pi/workflow claim; import scans, global edge
 rebuilds, and snapshot cloning remain costs.
 
-## Service smoke measurement
+## Service evaluation
 
-One macOS arm64 release run, 1,000 files/empty Rust functions, four indexing threads, watching
-disabled. Sixteen checkpoints with successive edits raised sampled owner RSS 13.8 → 38.4 MiB.
-Mean explicit-update round trip: 6.7 ms including CLI startup. Forget did not immediately reduce
-RSS (possibly allocator retention). Not peak memory, p95, or a representative-repository result.
+2026-09-05, Rust 1.95 release, four index threads, watching disabled for timings. Small real
+Rust workload: StackScout `src/` at `8fe00554`, 24 files / 214,397 bytes including inline tests.
+[macOS samples](benchmarks/service-macos.json) and [Linux samples](benchmarks/service-linux.json)
+include a source hash, query shape, counts, and every timing. Host: Apple M5 Max, macOS 26.6.2;
+Linux arm64: `rust:1.95` under OrbStack 7.0.14, 18 vCPUs / ~16 GiB. Background load was uncontrolled.
+
+```sh
+STACKSCOUT_MEASURE_OUT=/tmp/service.json cargo test --release --test performance -- --ignored --nocapture
+cargo test --test service periodic_reconciliation -- --ignored --nocapture
+```
+
+Cold means a fresh owner/cache, **not cold disk**: source copy precedes timing. Ten cold samples
+include process launch and readiness polling; `wait4` records per-owner kernel peak RSS. Warm
+queries use six untimed queries/100 samples, each with a fresh socket and full JSON response. The depth-2
+`diff_dirs` query returns seven symbols/17 calls and explicitly truncates deeper paths. Updates
+append a small synthetic callable to `src/lib.rs`, exclude file-write time, include sync round trip,
+and assert one new generation/parse per edit.
+Second-client samples (30) include CLI startup and assert no extra parsing. p95 is nearest-rank;
+with ten cold samples it is the maximum, not a stable tail estimate.
+
+| Metric | macOS | Linux |
+| --- | ---: | ---: |
+| Cold index p50 / p95, ms | 15.74 / 351.60 | 14.57 / 21.72 |
+| Cold kernel peak RSS, maximum MiB | 19.14 | 14.24 |
+| Warm graph p95, ms | 2.56 | 3.46 |
+| Connect + status p95, ms | 2.54 | 3.31 |
+| One-file sync p95, ms | 5.12 | 8.90 |
+| Second CLI client p95, ms | 7.44 | 3.40 |
+| Status during initial indexing p95, ms | 2.31 | 3.14 |
+| RSS with 32 distinct checkpoint generations, MiB | 118.00 | 117.52 |
+| RSS after 32 rolling review/ack cycles, MiB | 26.48 | 23.46 |
+
+Both warm targets (<10 ms queries, <50 ms updates) pass **on this small workload**. A fixed
+258-symbol TS graph with 1/16/128 affected callers had impact p95 2.55–2.57 ms on macOS,
+3.45–6.01 ms on Linux; diff p95 2.57–2.60 / 3.66–6.71 ms. None of those diffs truncated.
+These round trips do not isolate traversal cost or establish large-repository scaling.
+
+Named pins raised RSS roughly 3 MiB per distinct generation; forgetting did not immediately
+return memory to the OS. Rolling reviews stayed far smaller. Sampled `ps` RSS and kernel
+high-water counters are separate accounting measures, not exact retained-heap sizes.
+A first macOS launch dominated cold p95 (also observed at 379 ms in the earlier probe); cause
+is unassigned. Next-run cold budgets for this corpus: p95 <100 ms and kernel peak RSS <32 MiB.
+The latency budget is **not met on macOS**; investigate launch cost before adding a parse cache.
+
+Linux/macOS checks exercise startup races/crash recovery, unrelated-source read avoidance,
+failed-batch rollback, and two readers observing complete generations. The new parent-ignore
+probe catches unwatched discovery drift after 30.08 / 30.10 seconds. Callback overflow and loss
+during recovery are deterministically injected in the existing watcher unit test; kernel-buffer
+overflow is not forced. Timing/retention runners are opt-in, not flaky CI timing assertions.
