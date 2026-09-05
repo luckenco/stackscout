@@ -79,6 +79,7 @@ pub(super) struct Response {
     pub recovery_needed: bool,
     pub watcher_error: Option<String>,
     pub files: usize,
+    pub files_parsed: usize,
     pub analysis_issue_count: usize,
     pub analysis_issues: Vec<String>,
     pub progress: Option<Progress>,

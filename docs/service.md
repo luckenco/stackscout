@@ -62,6 +62,7 @@ Queries pin one generation and traverse outside the publication lock. Responses 
 | `index_complete` | Initial index exists; **not** compiler completeness or worktree freshness. |
 | `watching`, `recovery_needed`, `watcher_error` | Watcher installed without reported backend error, reconciliation debt, and backend/loss/overflow error. |
 | `files`, `analysis_issue_count`, `analysis_issues` | Queried-generation diagnostics: up to 32 issues, each capped at 2 KiB plus truncation marker. |
+| `files_parsed` | Cumulative cache-miss file analyses completed by this owner, including syntax failures and work later rolled back. Cache hits do not increment it. Operational counter, not pinned-generation data; resets on restart. |
 | `progress` | Null when idle; otherwise phase (`discovering`, `indexing`, `resolving`, `publishing`), `files_read`, `files_analyzed`, `total_files` (null during discovery). Analysis counts include cache hits. |
 | `last_update_error` | Retained until a successful full rescan. |
 | `checkpoint_generation`, `diff`, `graph`, `error` | Operation-specific results; otherwise null. |

@@ -394,6 +394,40 @@ fn diff_locations_retain_deleted_files_and_cross_file_call_sites() {
 }
 
 #[test]
+fn parse_counts_exclude_cache_hits_but_include_syntax_failures_and_rolled_back_work() {
+    let mut workspace = Workspace::new();
+    let root = workspace.root.clone();
+    fs::write(root.join("api.ts"), "export function run() {}").unwrap();
+    fs::write(root.join("syntax.ts"), "export function broken( {").unwrap();
+    workspace.start();
+    let initial = request(&root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    assert_eq!(initial["files_parsed"], 2);
+    assert_eq!(initial["analysis_issue_count"], 1);
+    request(&root, r#"{"version":1,"op":"checkpoint","name":"before"}"#);
+    for operation in [
+        r#"{"version":1,"op":"rescan"}"#,
+        r#"{"version":1,"op":"sync","paths":["api.ts","syntax.ts"]}"#,
+        r#"{"version":1,"op":"diff","name":"before"}"#,
+    ] {
+        assert_eq!(request(&root, operation)["files_parsed"], 2);
+    }
+    fs::write(root.join("api.ts"), "export function run() { changed(); }").unwrap();
+    let changed = request(&root, r#"{"version":1,"op":"sync","paths":["api.ts"]}"#);
+    assert_eq!(changed["files_parsed"], 3);
+    fs::write(root.join("api.ts"), "export function run() { again(); }").unwrap();
+    fs::write(root.join("invalid.ts"), [0xff]).unwrap();
+    let failed = request(&root, r#"{"version":1,"op":"rescan"}"#);
+    assert!(failed["error"].is_string());
+    assert_eq!(failed["generation"], changed["generation"]);
+    assert_eq!(failed["files_parsed"], 4);
+    fs::remove_file(root.join("invalid.ts")).unwrap();
+    assert_eq!(
+        request(&root, r#"{"version":1,"op":"rescan"}"#)["files_parsed"],
+        5
+    );
+}
+
+#[test]
 fn startup_racers_share_one_owner_and_crash_recovery_does_not_restore_checkpoints() {
     let mut workspace = Workspace::new();
     fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();

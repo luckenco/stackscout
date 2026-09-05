@@ -38,6 +38,7 @@ struct State {
     checkpoints: BTreeMap<String, Arc<Generation>>,
     progress: Option<protocol::Progress>,
     last_error: Option<String>,
+    files_parsed: usize,
 }
 
 struct Shared {
@@ -61,6 +62,7 @@ impl Shared {
             recovery_needed: watch.recovery_needed,
             watcher_error: watch.error.as_ref().map(protocol::diagnostic),
             files: current.map_or(0, |value| value.files),
+            files_parsed: state.files_parsed,
             analysis_issue_count: current.map_or(0, |value| value.issue_count),
             analysis_issues: current.map_or_else(Vec::new, |value| value.issues.clone()),
             progress: state.progress.clone(),
@@ -351,14 +353,11 @@ fn load(
                 let file = snapshot
                     .prepare(&relative, &bytes, analyzers)
                     .map_err(|error| error.to_string())?;
-                shared
-                    .state
-                    .lock()
-                    .expect("service state poisoned")
-                    .progress
-                    .as_mut()
-                    .unwrap()
-                    .files_analyzed += 1;
+                let mut state = shared.state.lock().expect("service state poisoned");
+                state.progress.as_mut().unwrap().files_analyzed += 1;
+                if file.is_some() {
+                    state.files_parsed += 1;
+                }
                 Ok((relative, file))
             })
             .collect::<Vec<Result<_, String>>>()
