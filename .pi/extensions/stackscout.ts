@@ -215,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Call graph",
 		description: "Query saved Rust/TypeScript callers, callees, or impact in the shared repository index. Accepts unique names or language:file::qualified::name IDs. Bounded to 2000 lines / 50 KiB; static results are advisory.",
 		promptSnippet: "Find callers, callees, or impact with source locations in the shared index",
-		promptGuidelines: ["Use call_graph to drill into symbols from call_graph_diff; use refresh after Bash/external edits when freshness matters."],
+		promptGuidelines: ["Use call_graph for a concrete caller/callee question or to drill into review/diff evidence. Use refresh after Bash/external edits when freshness matters."],
 		parameters: Type.Object({
 			action: StringEnum(["callers", "callees", "impact"] as const),
 			symbol: Type.String(),
@@ -237,7 +237,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Scoped call graph review",
 		description: "Show changes relevant to explicit repository-relative files or symbols since this scope's last acknowledgement (initially session start). Before/after witness paths include dependencies, callers, removals, and uncertainty. Bounded to 2000 lines / 50 KiB. Does not acknowledge or advance the session baseline.",
 		promptSnippet: "Review changes relevant to files/symbols since their last explicit acknowledgement",
-		promptGuidelines: ["Use call_graph_review for repeated scoped checks. Inspect warnings and paths before call_graph_ack; acknowledgement applies only to that exact scope and inspected generation, not later writes or other scopes."],
+		promptGuidelines: ["Use call_graph_review when a file/symbol scope can narrow inspection. Reuse still-applicable source reads; inspect changed paths and warnings. Use call_graph_ack only when advancing that scope for a later review; one-shot checks need no acknowledgement."],
 		parameters: Type.Object({
 			files: Type.Optional(Type.Array(Type.String(), { maxItems: 16 })),
 			symbols: Type.Optional(Type.Array(Type.String(), { maxItems: 16 })),
@@ -280,7 +280,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Call graph diff",
 		description: "Compare saved Rust/TypeScript call paths against the immutable Pi session-start checkpoint. Includes aggregate workspace changes, not authorship. Bounded to 2000 lines / 50 KiB; service truncation is explicit.",
 		promptSnippet: "Compare current call paths with the Pi session-start checkpoint",
-		promptGuidelines: ["Use call_graph_diff after call-affecting Rust/TypeScript edits; inspect unintended impact and report missing, noisy, or incorrect results. Use refresh after Bash/external edits when freshness matters."],
+		promptGuidelines: ["Use call_graph_diff for a session-wide call-path question after Rust/TypeScript edits. Prefer call_graph_review for scoped checks; choose one scope rather than repeating both on the same saved state. Inspect unintended impact and report missing, noisy, or incorrect evidence. Use refresh after external edits."],
 		parameters: Type.Object({ refresh: REFRESH, diagnostics: Type.Optional(Type.Boolean()) }),
 		async execute(_id, { refresh, diagnostics }, signal, _onUpdate, ctx) {
 			signal?.throwIfAborted();
