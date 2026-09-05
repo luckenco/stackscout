@@ -1,194 +1,142 @@
-# Repository service: Milestone 3
+# Repository service
 
-Experimental protocol v1 for Linux and macOS. One resident index, filesystem reconciliation,
-bounded parallel indexing, immutable generations, and graph queries. Windows is out of scope.
-The bundled Pi extension still uses directory diffs; service-backed Pi integration is Milestone 4.
+Experimental protocol v1, Linux/macOS only. One canonical-root owner maintains a watched
+index and immutable generations. The bundled Pi extension still uses directory diffs.
 
 ## Run
 
 ```sh
 cargo build
-# Foreground owner; stop with Ctrl-C. Usually request starts it instead.
-target/debug/stackscout serve /path/to/workspace
-
-# Connect or start an owner. Concurrent startup losers reconnect without indexing.
+target/debug/stackscout serve /path/to/workspace  # foreground; stop with Ctrl-C
+# request connects or starts an owner:
 target/debug/stackscout request . '{"version":1,"op":"status"}'
 target/debug/stackscout request . '{"version":1,"op":"sync","paths":[]}'
-target/debug/stackscout request . '{"version":1,"op":"checkpoint","name":"session-1"}'
-# Acknowledge these writes without waiting for the debouncer:
+target/debug/stackscout request . '{"version":1,"op":"checkpoint","name":"session"}'
+# After editing src/lib.rs:
 target/debug/stackscout request . '{"version":1,"op":"sync","paths":["src/lib.rs"]}'
-target/debug/stackscout request . '{"version":1,"op":"diff","name":"session-1"}'
-target/debug/stackscout request . '{"version":1,"op":"callers","symbol":"rust:src/lib.rs::diff_dirs"}'
+target/debug/stackscout request . '{"version":1,"op":"diff","name":"session"}'
 target/debug/stackscout request . '{"version":1,"op":"impact","symbol":"rust:src/lib.rs::diff_dirs","depth":8,"limit":64}'
 ```
 
-`request` prints JSON. Operation failures appear in `error`; check that field even when the CLI
-exits successfully. Transport/startup failures exit unsuccessfully. The Rust `service::request`
-API connects only; subprocess startup belongs to the CLI.
+Check JSON `error` even when the CLI exits successfully; transport/startup failures exit
+unsuccessfully. Rust `service::request` connects only; the CLI owns subprocess startup.
 
-Owner configuration (set before starting the owner; reconnecting does not reconfigure it):
+Set owner configuration before startup; reconnecting does not reconfigure it:
 
-- `STACKSCOUT_INDEX_THREADS=1..8`: private Rayon pool size; default available CPUs, capped at 4.
-- `STACKSCOUT_WATCH=0`: disable watching and periodic reconciliation for explicit-update workflows.
-
-## Ownership and transport
-
-The canonical root owns `.stackscout/owner.lock`. The OS lock is held for the owner's lifetime,
-including when using a fallback socket. Never unlink it while an owner may be running. Startup
-losers return before scanning or starting a watcher. A restart removes a stale socket only under
-the lock and refuses to replace non-socket or unowned endpoints.
-
-Normally the endpoint is `.stackscout/service.sock`. If its path is 100 bytes or longer, use
-`/tmp/stackscout-<effective-uid>/<blake3-of-canonical-root>.sock` instead. Both clients and owners
-choose identically, including through root aliases. Service directories must be real, owned,
-mode-0700 directories; locks and sockets must be owned and mode 0600. Lock opens reject symlinks.
-Existing unsafe permissions are errors, not silently repaired. This assumes a trusted,
-user-controlled workspace, not an adversarial shared filesystem. Fallback sockets may remain
-after termination and are recovered on the next start for that root.
-
-Send one UTF-8 JSON request followed by a newline per Unix socket connection. One JSON response
-followed by a newline closes it. Requests require `version: 1` and reject unknown operations and
-fields. Requests are limited to 64 KiB; incomplete frames have a five-second absolute deadline.
-Replies have a five-second write deadline; the bundled client waits up to 120 seconds for a reply
-and rejects incomplete or oversized (over 1 MiB) responses.
-
-The client never replays a mutation after a transport failure: a disconnected mutation may still
-complete. Reconnect and inspect **instance and generation** rather than assuming cancellation.
-The owner survives client disconnects. There is no shutdown operation or idle expiry; terminate
-the foreground owner or the PID at the start of `instance`. Restarts change instance identity and
-lose in-memory checkpoints. Missing checkpoints are errors, never silently recreated baselines.
+- `STACKSCOUT_INDEX_THREADS=1..8`: private Rayon pool; default CPU count capped at 4.
+- `STACKSCOUT_WATCH=0`: disable watching and periodic reconciliation.
 
 ## Requests
 
-All requests include `"version":1`:
+Every request requires `"version":1`; unknown operations/fields are rejected.
 
-| `op` | Other fields | Meaning |
+| `op` | Fields | Meaning |
 | --- | --- | --- |
-| `status` | none | Read readiness, generation, progress, watcher health, and diagnostics. |
-| `sync` | `paths: string[]` | Re-read only named source files; missing/ignored files become deletions. Empty paths wait for the initial scan and previously queued explicit updates; they do not force watcher delivery or a scan. |
-| `rescan` | none | Reconcile the worktree, including deletions and ignore changes; reuse unchanged analysis. |
-| `checkpoint` | `name: string` | Pin the current published generation. Repeating a name returns the original checkpoint. |
-| `diff` | `name: string`, optional `diagnostics: bool` | Compare the checkpoint against the generation captured when query execution begins. |
-| `forget` | `name: string` | Release a checkpoint. Unknown names are errors. |
-| `callers` | `symbol: string`, optional `depth`, `limit` | Follow incoming edges; default depth 1. |
-| `callees` | same | Follow outgoing calls; default depth 1. |
-| `impact` | same | Follow incoming edges transitively; default depth 16, including private callers. |
+| `status` | — | Read readiness, generation, progress, health, and diagnostics. |
+| `sync` | `paths: string[]` | Re-read named files; missing/ignored files become deletions. `[]` waits for initial indexing and queued explicit updates, **not** watcher delivery or a scan. |
+| `rescan` | — | Reconcile all files, deletions, and ignore changes; reuse unchanged analysis. |
+| `checkpoint` | `name` | Pin current publication; repeating a name returns the original checkpoint. |
+| `diff` | `name`, optional `diagnostics: bool` | Compare checkpoint to generation captured at query execution. |
+| `forget` | `name` | Release checkpoint; unknown names are errors. |
+| `callers` / `callees` | `symbol`, optional `depth`, `limit` | Incoming/outgoing graph traversal; default depth 1. |
+| `impact` | same | Incoming traversal including private callers; default depth 16. |
 
-Sync paths must be normalized repository-relative source paths: no absolute paths, `..`, empty
-components, backslashes, colons, unsupported extensions, or declaration-only TypeScript files.
-Duplicates are deduplicated. Include old and new source paths for an explicitly acknowledged
-rename; one batch publishes atomically. Targeted discovery shares scanning's ignore, hidden-file,
-and non-following symlink policy. It visits requested ancestors and may read ignore configuration,
-but not unrelated source contents. Use `rescan` for directory or ignore-configuration changes.
+Sync paths are normalized, repository-relative supported source paths: no absolute paths,
+`..`, empty components, backslashes, colons, or TypeScript declaration files. Paths are
+deduplicated; include old and new paths for renames. Targeted sync shares scan ignore/hidden/
+non-following-symlink rules and visits ancestors/ignore configuration, not unrelated source
+contents. Use `rescan` for directory or ignore changes.
 
-Checkpoints require a completed initial index. Names contain 1–256 bytes; at most 64 names may be
-retained. They share immutable generations, not a snapshot clone per name. During indexing, a
-checkpoint pins the previous complete generation; `checkpoint_generation` identifies it.
+Checkpoints require a completed initial index; during updates they pin the previous complete
+generation. Names are 1–256 bytes, at most 64 retained. Names share immutable generations.
+Restarts lose checkpoints; missing names are errors, never recreated baselines.
 
-### Graph-query contract
+## Consistency and responses
 
-Selectors accept a unique short/qualified name or a file-qualified ID such as
-`rust:src/lib.rs::module::function` or `ts:src/api.ts::Class::method`. Unknown or ambiguous selectors
-are errors, not guessed matches. Selection inspects at most 10,000 symbols; file-qualified IDs
-restrict the search to that file. Scope components may themselves contain `::` (Rust impl types).
+Queries pin one generation and traverse outside the publication lock. Responses include:
 
-Each query pins one generation and traverses outside the publication lock. `graph` contains:
+| Fields | Contract |
+| --- | --- |
+| `version`, `root`, `instance` | Protocol version, canonical root, owner identity; instance changes on restart. |
+| `generation` | Null before initial publication; changed batches advance once, no-ops retain it. Monotonic only within an instance. |
+| `index_complete` | Initial index exists; **not** compiler completeness or worktree freshness. |
+| `watching`, `recovery_needed`, `watcher_error` | Watcher installed without reported backend error, reconciliation debt, and backend/loss/overflow error. |
+| `files`, `analysis_issue_count`, `analysis_issues` | Queried-generation diagnostics: up to 32 issues, each capped at 2 KiB plus truncation marker. |
+| `progress` | Null when idle; otherwise phase (`discovering`, `indexing`, `resolving`, `publishing`), `files_read`, `files_analyzed`, `total_files` (null during discovery). Analysis counts include cache hits. |
+| `last_update_error` | Retained until a successful full rescan. |
+| `checkpoint_generation`, `diff`, `graph`, `error` | Operation-specific results; otherwise null. |
+| `truncated` | Graph limits or diff depth/node/48-KiB limit reached. Diff byte cuts preserve UTF-8 and append a marker. |
 
-- `symbols`: ID, file, source range, and shortest discovered depth; the selected symbol is depth 0.
-- `calls`: caller, optional callee, target label, source range, and `resolution` (`resolved`,
-  `ambiguous`, `unresolved`, or `uncertain`). Ambiguous candidates are separate possible edges and
-  are traversed in either direction. Unresolved/uncertain outgoing calls have null callees;
-  incoming queries cannot infer their destinations.
-- `truncated` and a warning explaining syntactic/analysis limits. These are not compiler-complete
-  results; an empty incoming result cannot prove absence of impact. Source ranges use one-based
-  lines and columns (columns count UTF-8 bytes), matching the extractor.
+Watching is eventually consistent even when health is green. Await explicit path sync to
+acknowledge known writes; protocol v1 has no minimum-generation query parameter. Scans read
+files at different times: atomic publication is not a filesystem-wide write transaction.
 
-`depth` is 0–32. `limit` is 1–256 symbols, including the selected symbol; default 64. Traversal
-also stops at 1,024 retained calls, a 20,000-step/candidate work budget, or 48 KiB of encoded graph
-JSON. Depth cutoffs report truncation when further calls exist. Byte limits account for JSON
-escaping before retaining items. Cycles terminate, results are deterministic, and all limits
-return structured partial results with explicit truncation, not malformed JSON.
+Failed initial scans publish nothing; partial sync cannot establish readiness. Later fatal
+I/O, UTF-8, path, size, or graph errors preserve the previous repository/publication. Syntax
+failures instead publish cached diagnostics and omit affected files from both diff sides.
 
-## Watching and publication
+## Graph-query contract
 
-`notify-debouncer-full` uses the platform-recommended backend, a 100 ms debounce interval,
-non-following symlink configuration, and `NoCache`: invalidation does not require a second
-file-ID tree cache. Events are hints, never authoritative edits. Watching starts before the
-initial scan; events arriving during indexing remain pending for subsequent reconciliation.
+Selectors accept unique short/qualified names or IDs such as `rust:src/lib.rs::module::fn`
+and `ts:src/api.ts::Class::method`. Unknown/ambiguous selectors are errors. Selection inspects
+at most 10,000 symbols; file-qualified IDs restrict it to that file. Rust impl scope components
+may themselves contain `::`.
 
-The callback deduplicates up to 4,096 source paths without waiting for indexing. Directory,
-removal, ignore-configuration, and other non-source events conservatively request a full scan.
-Hidden paths are filtered except discovery control files. Lost-event flags, watcher errors, and
-our own pending-path overflow retain a recovery-needed signal even if the path buffer is cleared.
-A loss arriving during recovery requires another scan. Failed automatic updates retry after one
-second. With watching enabled, a 30-second reconciliation also catches external/global ignore
-changes and silent loss; failed watchers are restarted on that interval. The debounce library
-and OS have their own buffering/resource limits; our path limit is not a total watcher-memory cap.
+`graph` contains:
 
-Per-file reading and analysis use a private Rayon pool with job-local analyzers. Source bytes are
-released after each job rather than retained for the entire batch. Each source is limited to
-8 MiB; oversized files fail the whole batch explicitly. At most one such source per active worker
-is being read/analyzed (allocator and parser overhead is additional). Cached content/parser hashes
-skip unchanged analysis, including syntax failures. Results and errors are assembled in sorted
-path order; resolution runs once before atomically publishing a complete generation.
+- `symbols`: ID, file, source range, shortest discovered depth (selected symbol = 0).
+- `calls`: caller, optional callee, target, range, and `resolution` (`resolved`, `ambiguous`,
+  `unresolved`, `uncertain`). Ambiguous candidates are separate possible edges in either
+  direction; unresolved/uncertain outgoing calls have null callees and no inferred incoming edge.
+- `truncated` and a syntactic-analysis warning. Empty incoming results do not prove no impact.
 
-A failed initial scan publishes nothing; repair the error and rescan (or wait for automatic
-recovery). A partial sync cannot establish an initial index. Later fatal I/O, UTF-8, path, size,
-or graph errors leave the repository and published snapshot unchanged. Syntax failures instead
-publish cached diagnostics; affected paths are omitted from both sides of diffs.
+Ranges use one-based lines/columns; columns count UTF-8 bytes. Results are deterministic and
+cycle-safe. Limits return structured partial results: depth 0–32, symbols 1–256 (default 64,
+including root), 1,024 calls, 20,000 steps/candidates, and 48 KiB encoded graph JSON. Depth
+cutoffs report truncation when further calls exist; byte budgeting includes JSON escaping.
 
-## Response contract
+## Ownership and transport
 
-Each response includes:
+The owner holds `.stackscout/owner.lock` for its lifetime. **Never unlink a live owner's lock.**
+Startup losers exit before scanning/watching; the CLI reconnects. Stale sockets are removed
+only under the lock; non-socket/unowned endpoints are refused.
 
-- `version`, canonical `root`, and service `instance`.
-- `generation`: null until the first successful scan, then monotonically increasing within that
-  instance. Changed batches advance once; no-op batches do not advance.
-- `index_complete`: an initial complete index exists, **not** compiler completeness or freshness.
-- `watching`: a watcher is installed without a reported backend error. `recovery_needed` reports
-  known reconciliation debt; `watcher_error` reports backend/loss/overflow problems. Successful
-  scans clear recovery debt only if no newer recovery signal arrived; watcher startup failures
-  remain visible until a watcher is installed and reconciliation succeeds.
-- `files`, `analysis_issue_count`, and up to 32 `analysis_issues` from the queried generation.
-  Diagnostic strings are capped at 2 KiB plus an explicit diagnostic-truncation marker.
-- `progress`: null when idle, otherwise `phase` (`discovering`, `indexing`, `resolving`, or
-  `publishing`), `files_read`, `files_analyzed`, and `total_files` (null during discovery).
-  Analysis progress includes cache hits, not just parser invocations.
-- `last_update_error`: the last failed update, retained until a successful full rescan.
-- `checkpoint_generation`, `diff`, `graph`, and `error` when applicable; otherwise null.
-- `truncated`: graph-query truncation, or depth/node/48-KiB text limits in rendered diffs. Diff
-  byte truncation occurs at a UTF-8 boundary and ends with an explicit marker.
+Use `.stackscout/service.sock`, or, when its path is at least 100 bytes,
+`/tmp/stackscout-<effective-uid>/<blake3-of-canonical-root>.sock`. Root aliases choose the same
+endpoint. Directories must be real, owned, mode 0700; locks/sockets owned, mode 0600. Lock
+opens reject symlinks; unsafe permissions fail rather than being repaired. This assumes a
+trusted workspace, not an adversarial shared filesystem. Stale fallback sockets recover on restart.
 
-Even `watching: true` and `recovery_needed: false` do not prove worktree freshness: notifications
-can still be in flight or debouncing. Explicit path sync acknowledges those writes; `sync([])`
-is only an explicit-update queue barrier. Scans read files at different moments; atomic graph
-publication is not a filesystem-wide file-write transaction.
+One newline-terminated UTF-8 JSON request and response per connection. Requests: 64 KiB,
+5-second absolute incomplete-frame deadline. Replies: 5-second write deadline; the bundled
+client waits up to 120 seconds and rejects incomplete or >1-MiB responses.
 
-## Resource boundaries and verification
+Disconnected mutations may still complete and are never automatically replayed. Reconnect
+and inspect instance/generation rather than assuming cancellation. Owners outlive clients;
+there is no shutdown operation or idle expiry. Stop the foreground owner or PID prefix of `instance`.
 
-Nonblocking ingress holds at most 64 incomplete frames and evicts the oldest on overload. Four
-query workers and eight queued queries are separate from the single writer and its eight queued
-updates. Full queues reject requests explicitly. Waiting mutations and slow frame senders do not
-occupy query workers. Reply writes have deadlines; slow mutation readers can delay the writer,
-not consume read workers. Sustained overload can still reject/evict clients; there is no latency
-or fairness guarantee against arbitrary load. Ingress polls at a two-millisecond interval.
+## Indexing, recovery, and resource limits
 
-Updates still rebuild global resolution/edges. Staging clones the file map and publication clones
-the snapshot; prepared artifacts and retained checkpoints can consume substantial memory. Measure
-real workloads before adding structural sharing. Diff text is bounded after rendering, so its
-expansion/allocation costs are not eliminated. No async runtime, RPC framework, graph-library
-migration, or concurrent-map/publication crate is needed. `libc` supplies only Unix owner-ID and
-no-follow/nonblocking lock-open primitives; transport remains `std::os::unix::net`.
+- Watching starts before scanning: `notify-debouncer-full`, recommended backend, 100-ms debounce,
+  no symlink following, `NoCache`. Events during indexing remain pending.
+- The callback deduplicates up to 4,096 paths without waiting for indexing. Directory/removal/
+  ignore/non-source events request full scans; hidden paths are filtered except discovery controls.
+- Lost events, errors, and buffer overflow retain recovery debt; loss during recovery requires
+  another scan. Successful scans clear only older debt. Watcher startup failures remain visible
+  until installation and reconciliation succeed. Failed automatic updates retry after 1 second;
+  30-second reconciliation catches silent loss/global ignore changes and restarts failed watchers.
+  OS/debouncer buffers are additional to our path cap.
+- Job-local analyzers read at most one 8-MiB source per worker, releasing bytes per job; parser/
+  allocator overhead is additional. Oversized files fail the batch. Content/parser hashes reuse
+  unchanged analysis, including failures. Sorted results resolve once and publish atomically.
+- Ingress polls every 2 ms, retains 64 incomplete frames, evicts oldest on overload. Four query
+  workers/8 queued queries are separate from one writer/8 queued updates. Full queues reject.
+  Slow senders/waiting mutations do not occupy query workers; slow mutation readers can delay
+  the writer. Sustained overload has no fairness/latency guarantee.
+- Updates rebuild global edges; staging/publication clone maps/snapshots. Retained checkpoints
+  cost memory. Diff bytes are capped **after rendering**, so expansion/allocation remain unbounded
+  by that byte cap. See [measurements](performance.md#service-smoke-measurement) before optimizing.
 
-A local release-build smoke measurement on macOS arm64 used 1,000 files (one empty Rust function
-per file), four indexing threads, and watching disabled. Sixteen distinct checkpoints, each
-followed by a one-file edit, raised sampled owner RSS from 13.8 MiB to 38.4 MiB. Mean explicit
-update round-trip time was 6.7 ms including CLI process startup. Forgetting checkpoints did not
-immediately reduce RSS (allocator retention is possible). This is one synthetic run, not a peak
-memory, p95 latency, or real-repository performance claim.
-
-Behavioral tests cover serial/parallel replay of every fixture in both directions, atomic failures,
-watcher saves/renames/deletions/ignore changes, injected overflow and recovery epochs, shared startup
-and crash recovery, long paths, concurrent reads under slow-frame/mutation pressure, graph-query
-ambiguity/cycles/limits, protocol errors, and checkpoint retention. Run the README checks on both
-Linux and macOS. Pi lifecycle/generation acknowledgements remain Milestone 4.
+Run the [README checks](../README.md#checks) on Linux and macOS. Coverage includes serial/parallel
+fixture replay, atomic failures, watcher reconciliation/recovery, startup/crash/long-path ownership,
+read pressure, graph ambiguity/cycles/budgets, protocol limits, and checkpoint retention.

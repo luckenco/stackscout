@@ -1,34 +1,27 @@
-# Indexed resolution measurements
+# Performance measurements
 
-Baseline: `21a45112` (repository service already present), compared with the pass-local
-`BTreeMap` indexes added in this change. No runtime dependencies, parallelism, parser,
-resolution-policy, or service changes. Measurements on an Apple M5 Max, Darwin arm64,
-Rust 1.95.0, Node 24.19.0, release builds with the same lockfile.
+## Indexed resolution
 
-## Method
+Compared `21a45112` with `d6b978a6` (pass-local `BTreeMap` lookups). No parser,
+resolution-policy, service, parallelism, or runtime-dependency changes in that comparison.
+Apple M5 Max, Darwin arm64, Rust 1.95.0, Node 24.19.0; release builds, same lockfile.
+[Raw samples](benchmarks/resolution.json).
 
-- Generated directory pairs: ten functions per
-  file, a ten-function direct-call chain, one public/exported root per file, and one
-  unresolved leaf. Only the first file's leaf changes from `beforeCall` to `afterCall`.
-- Dense cases have three lines per function. Padded cases add 27 local declarations per
-  function: 100 files, 1,000 functions, 30,000 lines.
-- CLI: fresh processes, warm filesystem caches, one output-check warmup per binary,
-  then five samples alternating binary order. Output was byte-identical on all eight
-  cases. Timings include discovery, reading, parsing both trees, resolution, diff,
-  rendering, and process startup. They are not cold-disk measurements.
-- In-memory: one warmup and five samples, before and after measured separately.
-  Resolution includes index construction, symbol cloning, and index destruction over
-  already-extracted artifacts for **one** directory; returned-program destruction is
-  outside the timer. Update + diff is timed together after batched initial ingestion
-  and checkpoint creation, with each reset outside the timer.
-- Background load was not controlled. Small absolute differences are noisy. These
-  synthetic workloads do not establish a general speed advantage over other tools.
+### Method
 
-[Raw samples](benchmarks/resolution.json). This run's binaries, CLI runner, and logs
-are in `/tmp/stackscout-resolution-bench`. Those local scratch paths are not durable
-repository artifacts. The checked-in benchmark below regenerates the in-memory corpus.
+- Generated directory pairs: 10 functions/file, direct-call chains, one public/exported root
+  and unresolved leaf per file. Only the first leaf changes. Dense functions occupy 3 lines;
+  padded functions add 27 declarations (1,000 functions / 30,000 lines).
+- CLI: fresh processes, warm filesystem caches, one output-check warmup, five alternating
+  samples. Includes both trees' discovery, parsing, resolution, diff/render, and startup.
+  Output matched byte-for-byte on all eight cases.
+- In-memory: one warmup/five samples per version. Resolve includes index construction,
+  symbol cloning, and index destruction for one pre-extracted tree, excluding result destruction.
+  Update+diff follows batched ingestion/checkpoint creation; reset is outside the timer.
+- Background load was uncontrolled. These are not cold-disk, Pi, or general tool-comparison
+  results. Small differences are noisy.
 
-## Full CLI medians (milliseconds)
+### CLI medians (ms)
 
 | Language | Functions | Lines | Before | Indexed |
 | --- | ---: | ---: | ---: | ---: |
@@ -41,13 +34,11 @@ repository artifacts. The checked-in benchmark below regenerates the in-memory c
 | Rust | 10,000 | 30,000 | 12,010.46 | 162.66 |
 | Rust | 1,000 | 30,000 | 253.67 | 133.87 |
 
-The noisy tiny-TypeScript result was repeated with two warmups and 25 alternating
-samples: **3.81 ms before, 3.79 ms indexed**. On StackScout's own `src` directory
-(parent sources versus updated sources), seven alternating samples after two warmups
-measured **71.97 ms before, 52.32 ms indexed**, with identical 22,019-byte output and
-no incomplete-analysis diagnostics. This is one small real repository, not a broad corpus.
+Tiny TypeScript, repeated with 2 warmups/25 alternating samples: **3.81 → 3.79 ms**.
+StackScout `src/` (parent versus updated sources), 2 warmups/7 alternating samples:
+**71.97 → 52.32 ms**, identical 22,019-byte output, no analysis issues. One real repository.
 
-## In-memory medians (milliseconds)
+### In-memory medians (ms)
 
 | Operation | Language | Functions | Before | Indexed |
 | --- | --- | ---: | ---: | ---: |
@@ -58,22 +49,25 @@ no incomplete-analysis diagnostics. This is one small real repository, not a bro
 | One-file update + diff, padded | TypeScript | 1,000 | 3.735 | 2.158 |
 | One-file update + diff, padded | Rust | 1,000 | 64.545 | 2.261 |
 
-Single `/usr/bin/time -l` observations on the dense 10,000-function CLI case showed
-peak RSS rising from 68.5 to 72.0 MiB for Rust and 69.1 to 70.4 MiB for TypeScript.
-These are whole-process peaks, not allocation counts or retained-service memory.
+Single `/usr/bin/time -l` runs at 10,000 dense functions showed whole-process peak RSS
+**68.5 → 72.0 MiB** (Rust), **69.1 → 70.4 MiB** (TypeScript), not retained-service memory.
 
-## Repeatable resolver benchmark
+### Reproduce
 
 ```sh
 cargo test --release resolve::bench::scaling -- --ignored --nocapture
 ```
 
-The ignored benchmark uses only existing dependencies, prints raw millisecond samples,
-and runs separately from ordinary tests. To reproduce the baseline, run the same
-`src/resolve/bench.rs` module against the baseline resolver. Do not compare debug builds.
+This regenerates the in-memory corpus and prints raw samples. Run the same benchmark module
+against the baseline resolver for comparison; use release builds. Historical binaries/logs:
+`/tmp/stackscout-resolution-bench`.
+Those scratch artifacts are not durable. Lookup indexes are pass-local; import scans, global
+edge rebuilds, and snapshot cloning remain costs. Reprofile before further optimization.
 
-The improvement removes full-symbol scans from name lookup. Imports and export bindings
-still have per-call scans, updates still rebuild global resolution and graph edges, and
-checkpoints still clone snapshots. Indexes exist only during resolution; this change
-adds no persistent cache or invalidation scheme. Reprofile before adding parallelism,
-other collections, or more indexes.
+## Service smoke measurement
+
+One macOS arm64 release run: 1,000 files, one empty Rust function/file, 4 indexing threads,
+watching disabled. Sixteen distinct checkpoints, each followed by a one-file edit, raised
+sampled owner RSS **13.8 → 38.4 MiB**. Mean explicit update round trip was **6.7 ms**, including
+CLI startup. Forgetting checkpoints did not immediately reduce RSS (possible allocator retention).
+This is not peak memory, p95 latency, a real-repository result, or evidence of Pi token savings.

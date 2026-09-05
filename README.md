@@ -1,52 +1,24 @@
 # stackscout
 
-stackscout is an experiment in giving coding agents an incremental view of how code is
-changing.
+An experimental static call-graph index and semantic diff tool for coding agents,
+inspired by [Dillon Mulroy's call-stack workflow](https://x.com/dillon_mulroy/status/2069852516309762411?s=20)
+and [fff's resident repository index](https://github.com/dmtrKovalenko/fff).
 
-It is heavily inspired by
-[Dillon Mulroy's](https://x.com/dillon_mulroy/status/2069852516309762411?s=20) suggestion of asking
-your coding agents for call stacks.
+StackScout traces changed functions back to affected callers, preserving call order,
+branch context, and uncertainty. The goal is to guide agents to relevant source ranges
+without repeatedly reading the whole repository—not to replace source reads or tests.
 
-This works really well for me, since I've incorporated it in my workflow.
+## Directory diff
 
-## Vision
-
-[fff](https://github.com/dmtrKovalenko/fff) keeps a fast local repository index available to coding
-agents. The idea here is to do something similar for call graphs and changes over time.
-
-In a repo worked on by several coding agents, each agent is a different head of the same hydra.
-StackScout could let one head see what another head changed, and which callers or entrypoints that
-change affects, without re-reading and re-ingesting the whole file. A shared index could answer
-questions such as:
-
-- What call paths changed since this agent started?
-- What is another agent changing in this repo right now?
-- Did two agents change overlapping parts of the graph?
-
-StackScout may help with this workflow, or simply provide a faster way to inspect call stacks.
-
-## What it does today
-
-StackScout provides a one-shot directory CLI, an in-memory Rust API, and an experimental Unix
-repository service for Rust and TypeScript. It:
-
-- parses `.rs`, `.ts`, `.tsx`, `.mts`, and `.cts` files with Tree-sitter;
-- builds a static call graph for each directory;
-- compares the graphs and traces changes back to affected public or exported callers;
-- preserves call order and branch context; and
-- reports unresolved or ambiguous calls instead of guessing.
+Rust and TypeScript (`.rs`, `.ts`, `.tsx`, `.mts`, `.cts`) are parsed with Tree-sitter;
+declaration-only TypeScript files are skipped.
 
 ```sh
-stackscout diff-dir [--diagnostics] <before-directory> <after-directory>
+cargo build
+target/debug/stackscout diff-dir <before-directory> <after-directory>
 ```
 
-The repo-local Pi extension snapshots supported source files at session start and exposes this diff
-through `call_graph_diff`. Completed snapshots are retained for resumed sessions. If capture fails,
-the tool reports the failure and requires a new session; it never lazily snapshots after edits.
-The failure is retained in Pi session metadata across reload/resume. Cancelling a tool call only
-cancels its Cargo command, not session baseline capture.
-
-For example, adding an `audit` call inside `save` can produce:
+Adding `audit()` inside `save()` can produce:
 
 ```text
   ts:api.ts::create
@@ -55,40 +27,46 @@ For example, adding an `audit` call inside `save` can produce:
       ts:store.ts::insert
 ```
 
-### Compact output
+`~` marks local syntax, export, or resolved-call changes. `+`/`-` mark paths added/removed
+in that context, not necessarily new/deleted implementations. Unchanged callee bodies
+with no reachable changes in either graph become `[unchanged body omitted]`. Changed
+and ambiguous descendants remain expanded; subtrees containing `[truncated]` stay visible.
+Control characters in labels are escaped onto one line without changing literal identity
+or source ranges. Compact rendering reduces output, not graph-building work.
 
-Added and removed paths retain their call edges, but callee bodies with no changed paths
-reachable in either graph are replaced by `[unchanged body omitted]`. Changed descendants
-—including ambiguous candidates—remain expanded under every explanatory root. Subtrees
-containing `[truncated]` are not collapsed, so existing expansion limits stay visible.
-A `+` or `-` marks a path added or removed from that context, not necessarily a new or deleted
-callee implementation.
+Files with analysis failures are omitted from both sides. Issue transitions report incomplete
+analysis; unchanged failures are hidden unless `diff-dir --diagnostics` is requested.
 
-Labels containing control characters are quoted and escaped onto one line (`\n`, `\t`, etc.).
-Literal contents, call identities, and source ranges are not normalized or shortened.
-This reduces presentation noise, not graph-building work; long lines and large diffs can still
-exceed the Pi tool's output limits.
+## Pi
 
-## Experimental repository service
+The repo-local extension exposes `call_graph_diff` against a session-start source copy.
+Completed snapshots survive reload/resume; capture failures are retained in session metadata
+and require a new session. Tool execution never captures a late baseline. Cancellation
+stops its Cargo command, not baseline capture.
 
-The Linux/macOS service shares one watched index and immutable generations across clients:
+Each call reparses both directories. Output is capped at 2,000 lines / 50 KiB, with full
+truncated output saved to a temporary file. Hidden-directory discovery excludes the extension
+itself. Pi is **not yet connected to the repository service**.
+
+## Repository service
+
+Linux/macOS clients can share a watched index, immutable generations, named checkpoints,
+and bounded `callers`, `callees`, and `impact` queries with source locations.
 
 ```sh
-stackscout request . '{"version":1,"op":"sync","paths":[]}'
-stackscout request . '{"version":1,"op":"checkpoint","name":"session"}'
+target/debug/stackscout request . '{"version":1,"op":"sync","paths":[]}'
+target/debug/stackscout request . '{"version":1,"op":"checkpoint","name":"session"}'
 # After editing src/lib.rs:
-stackscout request . '{"version":1,"op":"sync","paths":["src/lib.rs"]}'
-stackscout request . '{"version":1,"op":"diff","name":"session"}'
+target/debug/stackscout request . '{"version":1,"op":"sync","paths":["src/lib.rs"]}'
+target/debug/stackscout request . '{"version":1,"op":"diff","name":"session"}'
 ```
 
-`request` connects or starts a background owner; `serve <root>` runs one in the foreground.
-Check the response's `error`, `instance`, generation, completeness, and watcher-health fields.
-Watching is eventually consistent; explicit path sync acknowledges writes without waiting for
-notifications. The service also provides bounded `callers`, `callees`, and `impact` queries,
-parallel indexing, and a private Unix socket fallback for long paths. The Pi extension is not
-connected to this service. See [the protocol and resource limits](docs/service.md).
+`request` connects or starts an owner; `serve <root>` runs one in the foreground.
+Before integrating a client, read the [protocol and consistency contract](docs/service.md):
+JSON `error` matters even on CLI success, watching is eventually consistent, and restarts
+lose checkpoints. `sync([])` is not a watcher flush.
 
-## In-memory Rust API
+## Rust API
 
 ```rust
 let mut repo = stackscout::Repository::new()?;
@@ -98,42 +76,22 @@ repo.change("lib.rs", b"pub fn run() { audit(); } fn audit() {}")?;
 println!("{}", repo.diff("session")?);
 ```
 
-`change` accepts repository-relative paths and source bytes; `delete` removes a file.
-Neither reads the filesystem. An unchanged content hash and parser identity skip parsing
-and graph rebuilding, including for cached syntax failures. Named checkpoints remain
-queryable after later updates. `diff_with_diagnostics` includes unchanged issue details.
+`change` takes relative paths/bytes; `delete` removes files. Neither reads the filesystem.
+Content/parser hashes skip unchanged analysis, including syntax failures. Updates rebuild
+global resolution/edges; public API checkpoints clone snapshots. The service batches graph
+rebuilds and shares pinned generations. There is no persistent cache or public bulk-ingestion API.
 
-Updates parse only the changed file, but still rebuild resolution and all graph edges from
-cached artifacts. Checkpoints clone artifacts, diagnostics, and graph, so retained memory
-grows with the number of checkpoints. There is no persistent cache or public bulk-ingestion API yet.
-`diff-dir` and the Pi extension still use one-shot directory comparisons. Service requests reuse
-the resident core; initial scans and explicit batches rebuild the graph once per batch.
+## Resolution limits
 
-## What it does not do
+Rust resolves explicit scoped `use` bindings, groups, aliases, and `crate`/`self`/`super`
+paths for free/associated calls. Shadowing and ambiguity remain explicit. This assumes
+Rust 2018+ conventional file layouts, not a Cargo module graph: globs, re-export chains,
+`#[path]`, and inferred receiver types remain unsupported.
 
-StackScout is an early prototype. It does **not** currently:
-
-- connect the bundled Pi extension to the resident service;
-- provide a non-Unix service transport;
-- automatically coordinate coding-agent sessions;
-- provide VCS revision lookup;
-- expose MCP, editor, or coding-agent integrations beyond the bundled Pi extension;
-- avoid rescanning both directories on `diff-dir` or the current Pi tool's diff;
-- support languages other than Rust and TypeScript; or
-- provide compiler- or typechecker-complete call resolution.
-
-Rust resolves explicit `use` bindings—including groups, aliases, and `crate`/`self`/`super`
-paths—for free and associated-function calls. Bindings are scoped to their modules and blocks;
-known local shadowing does not become an imported call edge. Conflicting known targets remain
-ambiguous, while unexpanded globs and imports with unknown alternatives remain unresolved.
-This assumes Rust 2018+ paths and conventional file layouts, not Cargo-aware crate boundaries;
-re-export chains, `#[path]` modules, and inferred receiver types are not resolved.
-
-The graph is conservative and syntactic. Dynamic dispatch, reflection, Rust macro expansion,
-TypeScript type-driven method resolution, generated code, and calls outside the compared trees may
-remain unresolved. Parse-failure transitions are reported as incomplete rather than presented as
-trustworthy results. Unchanged failures are hidden by default; `--diagnostics` includes their full
-details.
+The graph is syntactic, not compiler-complete. Callback/closure bodies, macros, dynamic
+dispatch, reflection, generated code, type-driven methods, and external calls may be omitted
+or unresolved. Missing edges do not prove absence of impact. VCS revision lookup, non-Unix
+transport, additional languages, and automatic agent coordination are not implemented.
 
 ## Checks
 
@@ -144,18 +102,8 @@ cargo clippy --all-targets -- -D warnings
 bun test tests/pi_extension.test.ts
 ```
 
-The Pi lifecycle tests use temporary source directories and a stub Pi API; they require Bun
-but no npm dependency installation. They do not exercise Pi's loader or Cargo integration.
+Bun lifecycle tests use temporary files and a stub Pi API; no npm install is needed.
+They do not exercise Pi's loader, Cargo execution, or real truncation.
+For resolver measurements and the manual benchmark, see [performance](docs/performance.md).
 
-## Performance
-
-[Resolver benchmark results and methodology](docs/performance.md) cover the indexed
-lookup improvement. Run the manual scaling benchmark with:
-
-```sh
-cargo test --release resolve::bench::scaling -- --ignored --nocapture
-```
-
-## License
-
-[MIT](LICENSE)
+[MIT License](LICENSE)

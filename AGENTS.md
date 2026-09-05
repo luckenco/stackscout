@@ -1,37 +1,17 @@
-# Project shape
+# Design
 
-- Keep one Rust package until a component needs an independent build or release lifecycle.
-- Organize modules by responsibility, not one module per type.
-- Keep the core independent of CLI, filesystem watching, VCS, transport, and presentation.
-- Keep I/O at the edges. Core functions should accept plain data and return plain data or
-  explicit errors.
+- Keep one Rust package until a component needs independent builds or releases; group modules by responsibility.
+- Keep I/O and scheduling at the edges. Core functions take plain data and return data or explicit errors, independent of CLI, watching, VCS, and transport.
 - Keep dependencies one-way: extraction → resolution → graph → diff → rendering.
-- Do not use global mutable state or hidden singletons. Pass state and dependencies
-  explicitly.
-- Prefer concrete types and functions. Add a trait only when multiple implementations exist or
-  it protects a meaningful boundary.
-- Default to private or `pub(crate)` APIs; expose only deliberate contracts.
-- Preserve unresolved and ambiguous calls explicitly rather than guessing.
-- Make symbol identity and graph ordering deterministic; sort at output boundaries when
-  necessary.
-- Avoid async, background tasks, caches, persistence, and plugin systems until their need is
-  demonstrated.
-- Prefer small fixture-based behavioral tests over mocks, builders, and test-only
-  abstractions.
+- Pass state explicitly. Prefer concrete functions/types; add traits for multiple implementations or meaningful boundaries.
+- Default to private or `pub(crate)` APIs. Document public contracts with runnable doctests.
+- Preserve unresolved and ambiguous calls; keep symbol identity and output ordering deterministic.
+- Encode invariants in types, otherwise assert them. Prefer module-qualified imports over long type-import lists.
+- Add concurrency, caching, persistence, or plugins only for demonstrated needs. Report scaling assumptions, failure modes, and impact.
+- Prefer small behavioral fixtures over mocks and test-only abstractions.
 
-# Dogfooding
+# Verification
 
-- After Rust or TypeScript implementation edits that may affect the call graph, usually run
-  `call_graph_diff` once near the end.
-- Check for unintended impact. Report missing, noisy, or wrong results as dogfooding findings.
-
-# Rust
-
-- Keep things modular.
-- Define clear, testable contract boundaries. Document public contracts, and ensure Rustdoc examples compile and run as doctests.
-- Use assertions for invariants when encoding within types is not feasible.
-- Use clippy and fix code smells reported.
-- Prefer iterators when they are clearer; use explicit control flow when it is easier to read.
-- Make invalid state unrepresentable.
-- Prefer importing modules over long lists of types. Using `module::Type` at call sites is fine, keeps names unambiguous, and reduces namespace-collision churn.
-- Be wary of designs that will not scale. Report the limiting assumption, expected failure mode, and likely impact to the user.
+- For code changes, run the [README checks](README.md#checks); fix Clippy findings.
+- After call-affecting Rust/TypeScript edits, usually run `call_graph_diff` once near the end. Inspect unintended impact; report missing, noisy, or wrong results. Skip docs-only changes.
+- For service work, read [protocol, consistency, and resource contracts](docs/service.md) and verify on Linux and macOS.
