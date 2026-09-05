@@ -146,6 +146,43 @@ fn watcher_reconciles_atomic_saves_directories_ignores_and_unchanged_hashes() {
 }
 
 #[test]
+#[ignore = "manual 30-second watcher drift probe; see docs/performance.md"]
+fn periodic_reconciliation_catches_unwatched_ignore_changes() {
+    let mut workspace = Workspace::new();
+    workspace.watching = true;
+    let ignore = workspace.root.join(".ignore");
+    fs::write(&ignore, "").unwrap();
+    workspace.root = workspace.root.join("repo");
+    fs::create_dir(&workspace.root).unwrap();
+    fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();
+    workspace.start();
+    let initial = wait(&workspace.root, |status| status["index_complete"] == true);
+    assert_eq!(initial["files"], 1);
+    assert_eq!(initial["watching"], true);
+    // Parent ignore rules affect discovery, but the watcher observes only the child root.
+    fs::write(ignore, "lib.rs\n").unwrap();
+    let start = Instant::now();
+    loop {
+        let status = request(&workspace.root, r#"{"version":1,"op":"status"}"#);
+        assert!(status["last_update_error"].is_null(), "{status}");
+        if status["files"] == 0 {
+            assert_eq!(status["generation"], 2);
+            assert_eq!(status["files_parsed"], 1);
+            assert_eq!(status["recovery_needed"], false);
+            println!("unwatched ignore reconciliation: {:?}", start.elapsed());
+            break;
+        }
+        assert_eq!(status["files"], 1);
+        assert_eq!(status["generation"], 1);
+        assert!(
+            start.elapsed() < Duration::from_secs(45),
+            "silent drift never reconciled"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
 fn graph_queries_report_locations_ambiguity_limits_and_generations() {
     let mut workspace = Workspace::new();
     fs::write(
