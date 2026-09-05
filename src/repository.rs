@@ -56,6 +56,14 @@ impl Repository {
     /// Syntax failures replace the file's old evidence with a diagnostic. Invalid
     /// paths, non-UTF-8 bytes and graph-construction errors leave the state unchanged.
     pub fn change(&mut self, path: &str, bytes: &[u8]) -> Result<bool, Error> {
+        let Some(file) = self.file(path, bytes)? else {
+            return Ok(false);
+        };
+        self.current.replace(path, Some(file))?;
+        Ok(true)
+    }
+
+    fn file(&mut self, path: &str, bytes: &[u8]) -> Result<Option<File>, Error> {
         let key = Key {
             version: analyze::VERSION,
             syntax: source_path(path)?,
@@ -67,7 +75,7 @@ impl Repository {
             .get(path)
             .is_some_and(|file| file.key == key)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let source = std::str::from_utf8(bytes).map_err(|error| Error {
             message: format!("invalid UTF-8 source in {path}: {error}"),
@@ -76,8 +84,54 @@ impl Repository {
             .analyzers
             .file(path, source)
             .map_err(|error| analyze::Issue::new(path.to_owned(), error));
-        self.current.replace(path, Some(File { key, analysis }))?;
+        Ok(Some(File { key, analysis }))
+    }
+
+    // Stage a deduplicated batch, then resolve once and commit all or nothing.
+    #[cfg(any(unix, test))]
+    pub(crate) fn update(
+        &mut self,
+        changes: &BTreeMap<String, Option<Vec<u8>>>,
+    ) -> Result<bool, Error> {
+        let mut updates = Vec::new();
+        for (path, bytes) in changes {
+            let file = if let Some(bytes) = bytes {
+                let Some(file) = self.file(path, bytes)? else {
+                    continue;
+                };
+                Some(file)
+            } else {
+                source_path(path)?;
+                if !self.current.files.contains_key(path) {
+                    continue;
+                }
+                None
+            };
+            updates.push((path, file));
+        }
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        let mut files = self.current.files.clone();
+        for (path, file) in updates {
+            if let Some(file) = file {
+                files.insert(path.clone(), file);
+            } else {
+                files.remove(path);
+            }
+        }
+        let graph = crate::build(
+            files
+                .values()
+                .filter_map(|file| file.analysis.as_ref().ok()),
+        )?;
+        self.current = Snapshot { files, graph };
         Ok(true)
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        self.current.clone()
     }
 
     /// Removes a file and its diagnostic, if any. Returns false if absent. An
@@ -117,7 +171,7 @@ impl Repository {
     }
 }
 
-fn source_path(path: &str) -> Result<model::Syntax, Error> {
+pub(crate) fn source_path(path: &str) -> Result<model::Syntax, Error> {
     if path.contains(['\\', ':']) || path.split('/').any(|part| matches!(part, "" | "." | "..")) {
         return Err(Error {
             message: format!("expected a normalized repository-relative source path: {path}"),
@@ -129,12 +183,24 @@ fn source_path(path: &str) -> Result<model::Syntax, Error> {
 }
 
 #[derive(Clone, Default)]
-struct Snapshot {
+pub(crate) struct Snapshot {
     files: BTreeMap<String, File>,
     graph: graph::Graph,
 }
 
 impl Snapshot {
+    #[cfg(any(unix, test))]
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &String> {
+        self.files.keys()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn issues(&self) -> impl Iterator<Item = &analyze::Issue> {
+        self.files
+            .values()
+            .filter_map(|file| file.analysis.as_ref().err())
+    }
+
     fn replace(&mut self, path: &str, file: Option<File>) -> Result<(), Error> {
         // Build before mutating state so fatal errors cannot publish a partial update.
         let artifacts = self
@@ -153,7 +219,7 @@ impl Snapshot {
         Ok(())
     }
 
-    fn compare(&self, after: &Self, diagnostics: bool) -> Result<String, Error> {
+    pub(crate) fn compare(&self, after: &Self, diagnostics: bool) -> Result<String, Error> {
         let before_issues = self
             .files
             .values()

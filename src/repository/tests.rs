@@ -70,6 +70,79 @@ fn fixture_updates_match_fresh_analysis_in_both_directions() {
 }
 
 #[test]
+fn batch_updates_match_fixtures_and_reuse_unchanged_analysis() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
+    for entry in fs::read_dir(root).unwrap() {
+        let fixture = entry.unwrap().path();
+        let before = fixture.join("before");
+        let after = fixture.join("after");
+        for (before, after) in [(&before, &after), (&after, &before)] {
+            let original = sources(before);
+            let updated = sources(after);
+            let mut repo = Repository::new().unwrap();
+            repo.update(
+                &original
+                    .iter()
+                    .map(|(p, b)| (p.clone(), Some(b.clone())))
+                    .collect(),
+            )
+            .unwrap();
+            repo.checkpoint("before");
+            repo.analyzers.parsed.clear();
+            let mut batch = original
+                .keys()
+                .map(|p| (p.clone(), None))
+                .collect::<BTreeMap<_, _>>();
+            batch.extend(updated.iter().map(|(p, b)| (p.clone(), Some(b.clone()))));
+            repo.update(&batch).unwrap();
+            let parsed = updated
+                .iter()
+                .filter(|(p, b)| original.get(*p) != Some(*b))
+                .map(|(p, _)| p.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(repo.analyzers.parsed, parsed);
+            assert_eq!(
+                repo.diff("before").unwrap(),
+                crate::diff_dirs(before, after).unwrap()
+            );
+            assert_eq!(
+                repo.diff_with_diagnostics("before").unwrap(),
+                crate::diff_dirs_with_diagnostics(before, after).unwrap()
+            );
+            assert!(!repo.update(&batch).unwrap());
+            assert_eq!(repo.analyzers.parsed, parsed);
+        }
+    }
+}
+
+#[test]
+fn failed_batches_preserve_published_snapshots_and_all_files() {
+    let mut repo = Repository::new().unwrap();
+    repo.change("lib.rs", b"pub fn run() {}").unwrap();
+    repo.checkpoint("before");
+    let published = repo.snapshot();
+    for invalid in [vec![0xff], b"fn duplicate() {} fn duplicate() {}".to_vec()] {
+        let batch = BTreeMap::from([
+            ("a.rs".to_owned(), Some(b"pub fn added() {}".to_vec())),
+            ("lib.rs".to_owned(), None),
+            ("z.rs".to_owned(), Some(invalid)),
+        ]);
+        assert!(repo.update(&batch).is_err());
+        assert_eq!(repo.diff("before").unwrap(), "");
+        assert_eq!(repo.snapshot().paths().collect::<Vec<_>>(), ["lib.rs"]);
+    }
+    repo.change("lib.rs", b"pub fn run() { unknown(); }")
+        .unwrap();
+    assert!(
+        published
+            .compare(&repo.snapshot(), false)
+            .unwrap()
+            .contains("unknown")
+    );
+    assert_eq!(published.compare(&published, false).unwrap(), "");
+}
+
+#[test]
 fn updates_use_only_supplied_bytes_and_cache_analysis_failures() {
     let mut repo = Repository::new().unwrap();
     // These paths need not exist. Even initial ingestion only uses supplied bytes.

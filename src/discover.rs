@@ -16,12 +16,26 @@ pub(crate) enum DiscoverError {
 }
 
 pub(crate) fn sources(root: &Path) -> Result<Vec<PathBuf>, DiscoverError> {
+    selected(root, None)
+}
+
+// A targeted walk preserves the exact same ignore and symlink policy as a scan.
+// Only requested files and their ancestor directories are visited.
+pub(crate) fn selected(
+    root: &Path,
+    paths: Option<Vec<PathBuf>>,
+) -> Result<Vec<PathBuf>, DiscoverError> {
     if !root.is_dir() {
         return Err(DiscoverError::Missing(root.display().to_string()));
     }
 
+    let mut builder = WalkBuilder::new(root);
+    builder.standard_filters(true);
+    if let Some(paths) = paths {
+        builder.filter_entry(move |entry| paths.iter().any(|path| path.starts_with(entry.path())));
+    }
     let mut paths = Vec::new();
-    for entry in WalkBuilder::new(root).standard_filters(true).build() {
+    for entry in builder.build() {
         let entry = entry?;
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;

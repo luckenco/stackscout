@@ -27,7 +27,8 @@ StackScout may help with this workflow, or simply provide a faster way to inspec
 
 ## What it does today
 
-StackScout provides a one-shot directory CLI and an in-memory Rust API for Rust and TypeScript. It:
+StackScout provides a one-shot directory CLI, an in-memory Rust API, and an experimental Unix
+repository service for Rust and TypeScript. It:
 
 - parses `.rs`, `.ts`, `.tsx`, `.mts`, and `.cts` files with Tree-sitter;
 - builds a static call graph for each directory;
@@ -68,6 +69,24 @@ Literal contents, call identities, and source ranges are not normalized or short
 This reduces presentation noise, not graph-building work; long lines and large diffs can still
 exceed the Pi tool's output limits.
 
+## Experimental repository service
+
+The first service stage shares one index and immutable generations across clients:
+
+```sh
+stackscout request . '{"version":1,"op":"sync","paths":[]}'
+stackscout request . '{"version":1,"op":"checkpoint","name":"session"}'
+# After editing src/lib.rs:
+stackscout request . '{"version":1,"op":"sync","paths":["src/lib.rs"]}'
+stackscout request . '{"version":1,"op":"diff","name":"session"}'
+```
+
+`request` connects or starts a background owner; `serve <root>` runs one in the foreground.
+Check the response's `error`, `instance`, generation, and completeness fields. Filesystem
+watching is **not implemented yet**: notify changed paths explicitly or request `rescan`.
+The Pi extension is not connected to this service. See [the protocol and remaining service
+milestone requirements](docs/service.md).
+
 ## In-memory Rust API
 
 ```rust
@@ -85,20 +104,22 @@ queryable after later updates. `diff_with_diagnostics` includes unchanged issue 
 
 Updates parse only the changed file, but still rebuild resolution and all graph edges from
 cached artifacts. Checkpoints clone artifacts, diagnostics, and graph, so retained memory
-grows with the number of checkpoints. There is no persistent cache or bulk-ingestion API yet.
-The CLI and Pi extension still use one-shot directory comparisons, not this incremental API.
+grows with the number of checkpoints. There is no persistent cache or public bulk-ingestion API yet.
+`diff-dir` and the Pi extension still use one-shot directory comparisons. Service requests reuse
+the resident core; initial scans and explicit batches rebuild the graph once per batch.
 
 ## What it does not do
 
 StackScout is an early prototype. It does **not** currently:
 
-- keep a daemon or shared repository index running;
-- automatically feed file changes into the incremental API;
-- know about concurrent coding-agent sessions;
-- let one agent inspect another agent's live changes;
+- watch filesystem changes or recover from watcher loss;
+- connect the bundled Pi extension to the resident service;
+- expose callers/callees/impact queries through the service;
+- provide a non-Unix service transport;
+- automatically coordinate coding-agent sessions;
 - provide VCS revision lookup;
 - expose MCP, editor, or coding-agent integrations beyond the bundled Pi extension;
-- avoid rescanning both directories on every CLI or Pi diff;
+- avoid rescanning both directories on `diff-dir` or the current Pi tool's diff;
 - support languages other than Rust and TypeScript; or
 - provide compiler- or typechecker-complete call resolution.
 

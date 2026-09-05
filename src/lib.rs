@@ -6,6 +6,8 @@ mod model;
 mod render;
 mod repository;
 mod resolve;
+#[cfg(unix)]
+pub mod service;
 
 pub use repository::Repository;
 
