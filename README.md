@@ -54,6 +54,20 @@ For example, adding an `audit` call inside `save` can produce:
       ts:store.ts::insert
 ```
 
+### Compact output
+
+Added and removed paths retain their call edges, but callee bodies with no changed paths
+reachable in either graph are replaced by `[unchanged body omitted]`. Changed descendants
+—including ambiguous candidates—remain expanded under every explanatory root. Subtrees
+containing `[truncated]` are not collapsed, so existing expansion limits stay visible.
+A `+` or `-` marks a path added or removed from that context, not necessarily a new or deleted
+callee implementation.
+
+Labels containing control characters are quoted and escaped onto one line (`\n`, `\t`, etc.).
+Literal contents, call identities, and source ranges are not normalized or shortened.
+This reduces presentation noise, not graph-building work; long lines and large diffs can still
+exceed the Pi tool's output limits.
+
 ## In-memory Rust API
 
 ```rust

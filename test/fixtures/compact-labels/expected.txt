@@ -1,0 +1,4 @@
+~ rust:lib.rs::run
+-   "[unresolved: make(r\"a\nb\")::finish]"
++   [unresolved: make(r"a\nb")::finish]
+    rust:lib.rs::make

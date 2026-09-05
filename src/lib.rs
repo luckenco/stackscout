@@ -52,6 +52,9 @@ impl From<graph::GraphError> for Error {
 /// introduced, resolved, and changed analysis issues produce concise `! incomplete`
 /// diagnostics. Unchanged issues are hidden by default.
 ///
+/// Callee bodies without changed reachable paths may be explicitly omitted from the output.
+/// Labels containing control characters are quoted and escaped; call identity is unchanged.
+///
 /// ```
 /// let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
 ///     .join("test/fixtures/typescript-basic");

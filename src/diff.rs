@@ -9,6 +9,8 @@ const MAX_NODES: usize = 10_000;
 #[derive(Clone, Debug)]
 pub(crate) struct GraphDiff {
     pub(crate) roots: Vec<RootDiff>,
+    /// Symbols with no changed paths reachable in either graph.
+    pub(crate) unchanged: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,7 +44,7 @@ impl TreeNode {
         value
     }
 
-    fn contains(&self, identity: &str) -> bool {
+    pub(crate) fn contains(&self, identity: &str) -> bool {
         self.identity == identity || self.children.iter().any(|child| child.contains(identity))
     }
 }
@@ -55,9 +57,29 @@ pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
         .cloned()
         .collect::<BTreeSet<_>>();
     let direct = keys
-        .into_iter()
+        .iter()
         .filter(|key| changed(key, before, after))
+        .cloned()
         .collect::<BTreeSet<_>>();
+    let mut affected = direct.clone();
+    let mut pending = direct.iter().cloned().collect::<Vec<_>>();
+    while let Some(key) = pending.pop() {
+        for caller in before
+            .incoming
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .chain(after.incoming.get(&key).into_iter().flatten())
+        {
+            if affected.insert(caller.clone()) {
+                pending.push(caller.clone());
+            }
+        }
+    }
+    let unchanged = keys
+        .difference(&affected)
+        .map(ToString::to_string)
+        .collect();
 
     let mut roots = BTreeSet::new();
     for key in &direct {
@@ -88,7 +110,10 @@ pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
     }
     output.sort_by(|left, right| left.identity().cmp(right.identity()));
 
-    GraphDiff { roots: output }
+    GraphDiff {
+        roots: output,
+        unchanged,
+    }
 }
 
 impl RootDiff {

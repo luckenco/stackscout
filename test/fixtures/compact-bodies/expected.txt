@@ -1,0 +1,27 @@
++ ts:main.ts::first
++   ts:main.ts::stable
++     [unchanged body omitted]
++   ts:main.ts::stable
++     [unchanged body omitted]
++   ts:main.ts::changed
++     ts:main.ts::bridge
++       [unresolved: newMissing]
++       ts:main.ts::audit
+
+- ts:main.ts::old
+-   ts:main.ts::stable
+-     [unchanged body omitted]
+-   ts:main.ts::stable
+-     [unchanged body omitted]
+-   ts:main.ts::changed
+-     ts:main.ts::bridge
+-       [unresolved: oldMissing]
+
++ ts:main.ts::second
++   if (ready)
++     ts:main.ts::stable
++       [unchanged body omitted]
++     ts:main.ts::changed
++       ts:main.ts::bridge
++         [unresolved: newMissing]
++         ts:main.ts::audit

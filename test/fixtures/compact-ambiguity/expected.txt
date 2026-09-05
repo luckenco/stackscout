@@ -1,0 +1,13 @@
+  rust:lib.rs::right::work
+~   rust:lib.rs::right::nested
+      rust:lib.rs::right::work [cycle]
++     [unresolved: newMissing]
+
+~ rust:lib.rs::run
++   [ambiguous: work -> rust:lib.rs::left::work, rust:lib.rs::right::work]
++     rust:lib.rs::left::work
++       [unchanged body omitted]
++     rust:lib.rs::right::work
++       rust:lib.rs::right::nested
++         rust:lib.rs::right::work [cycle]
++         [unresolved: newMissing]

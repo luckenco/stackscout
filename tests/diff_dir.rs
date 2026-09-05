@@ -85,6 +85,38 @@ fn unresolved_changes_are_shown_without_unchanged_unresolved_noise() {
 }
 
 #[test]
+fn unchanged_bodies_are_omitted_but_changed_paths_remain() {
+    fixture("compact-bodies");
+}
+
+#[test]
+fn compact_bodies_preserve_ambiguous_changed_paths_and_cycles() {
+    fixture("compact-ambiguity");
+}
+
+#[test]
+fn compact_bodies_preserve_truncation_in_both_directions() {
+    let chain = (0..40)
+        .map(|i| format!("fn f{i}() {{ f{}(); }}\n", i + 1))
+        .collect::<String>();
+    let before = format!("{chain}pub fn run() {{}}");
+    let after = format!("{chain}pub fn run() {{ f0(); }}");
+    for (before, after) in [(&before, &after), (&after, &before)] {
+        let mut repo = stackscout::Repository::new().unwrap();
+        repo.change("lib.rs", before.as_bytes()).unwrap();
+        repo.checkpoint("before");
+        repo.change("lib.rs", after.as_bytes()).unwrap();
+        let output = repo.diff("before").unwrap();
+        assert!(output.contains("[truncated]"), "{output}");
+    }
+}
+
+#[test]
+fn multiline_labels_are_escaped_without_collapsing_call_identity() {
+    fixture("compact-labels");
+}
+
+#[test]
 fn rust_call_literals_are_preserved() {
     fixture("rust-call-literals");
 }
