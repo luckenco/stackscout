@@ -122,14 +122,43 @@ test("initial checkpoint must use the reconciled owner and generation", async ()
 	}
 });
 
-test("resume validates root and checkpoint generation", async () => {
+test("resume invalidates a changed repository root or checkpoint generation", async () => {
 	const app = harness();
 	await app.start();
-	for (const mismatch of [{ root: "/other" }, { checkpoint_generation: 2 }]) {
-		const resumed = harness((op) => op.op === "diff" ? mismatch : {}, [...app.entries]);
-		await resumed.start("resume");
-		await expect(resumed.run()).rejects.toThrow("baseline unavailable");
-	}
+	const entries = JSON.parse(JSON.stringify(app.entries));
+	entries.at(-1).data.root = "/other";
+	const moved = harness(() => ({}), entries);
+	await moved.start("resume");
+	await expect(moved.run()).rejects.toThrow("repository root changed");
+	const replaced = harness((op) => op.op === "diff" ? { checkpoint_generation: 2 } : {}, [...app.entries]);
+	await replaced.start("resume");
+	await expect(replaced.run()).rejects.toThrow("Checkpoint generation changed");
+});
+
+test.each(["reload", "resume", "startup"])("%s retains checkpoint identity through transient rescan failure", async (reason) => {
+	const app = harness();
+	await app.start();
+	const entries = JSON.parse(JSON.stringify(app.entries));
+	let broken = true;
+	const resumed = harness((op) => ({ error: broken && op.op === "rescan" ? "temporary read failure" : null }), entries);
+	await resumed.start(reason);
+	expect(entries).toEqual(app.entries);
+	expect(resumed.notices.at(-1)).toContain("Original checkpoint retained");
+	broken = false;
+	const result = await resumed.run();
+	expect(result.details).toMatchObject({ baseline: { status: "ready", generation: 1 } });
+	expect(resumed.calls.map((call) => call.op)).toEqual(["rescan", "rescan", "diff"]);
+});
+
+test.each([{ error: "query queue unavailable" }, { root: "/wrong" }, { checkpoint_generation: null }])("resume retains the baseline when checkpoint validation is inconclusive: %j", async (failure) => {
+	const app = harness();
+	await app.start();
+	let broken = true;
+	const resumed = harness((op) => broken && op.op === "diff" ? failure : {}, [...app.entries]);
+	await resumed.start("resume");
+	expect(resumed.entries).toEqual(app.entries);
+	broken = false;
+	expect((await resumed.run()).details).toMatchObject({ baseline: { status: "ready", generation: 1 } });
 });
 
 test("missing checkpoints stay unavailable across reload, without recreation", async () => {

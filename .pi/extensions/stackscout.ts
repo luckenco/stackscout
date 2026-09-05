@@ -92,6 +92,28 @@ export default function (pi: ExtensionAPI) {
 		return generation(response);
 	}
 
+	async function compare(ctx: ExtensionContext, expected: Generation, diagnostics?: boolean, signal?: AbortSignal) {
+		const saved = requireBaseline();
+		let response: Response;
+		try {
+			// Never use checkpoint here: it would create a late baseline if the name was forgotten.
+			response = await send(ctx, { op: "diff", name: saved.name, diagnostics }, signal);
+		} catch (error) {
+			if (message(error).startsWith("unknown checkpoint:")) fail(ctx, message(error));
+			throw error;
+		}
+		checkGeneration(response, expected);
+		if (!Number.isSafeInteger(response.checkpoint_generation) || response.checkpoint_generation! < 1) {
+			throw new Error("Service returned no checkpoint generation");
+		}
+		if (response.checkpoint_generation !== saved.generation) {
+			fail(ctx, "Checkpoint generation changed");
+			throw new Error(unavailable("Checkpoint generation changed"));
+		}
+		if (typeof response.diff !== "string") throw new Error("Service returned no diff");
+		return response;
+	}
+
 	pi.on("session_start", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const entries = ctx.sessionManager.getEntries();
@@ -111,13 +133,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				baseline = value;
 				root = await realpath(ctx.cwd);
-				if (root !== value.root) throw new Error("Session repository root changed");
+				if (root !== value.root) {
+					fail(ctx, "Session repository root changed");
+					return;
+				}
 				const expected = await prepare(ctx, undefined, true);
 				if (baseline.status !== "ready") return;
-				// Never use checkpoint here: it would create a late baseline if the name was forgotten.
-				const response = await send(ctx, { op: "diff", name: value.name });
-				checkGeneration(response, expected);
-				if (response.checkpoint_generation !== value.generation) throw new Error("Checkpoint generation changed");
+				await compare(ctx, expected);
 				return;
 			}
 			if (event.reason === "reload" || event.reason === "resume"
@@ -137,7 +159,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			save(ctx, { status: "ready", root: response.root, name, instance: response.instance, generation: response.checkpoint_generation! });
 		} catch (error) {
-			fail(ctx, message(error));
+			if (baseline.status === "ready") {
+				report(ctx, `StackScout refresh failed: ${message(error)}. Original checkpoint retained; retry a graph query after recovery.`);
+			} else {
+				fail(ctx, message(error));
+			}
 		}
 	});
 
@@ -202,19 +228,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({ refresh: REFRESH, diagnostics: Type.Optional(Type.Boolean()) }),
 		async execute(_id, { refresh, diagnostics }, signal, _onUpdate, ctx) {
 			signal?.throwIfAborted();
-			const saved = requireBaseline();
-			const expected = await prepare(ctx, signal, refresh);
 			requireBaseline();
-			let response: Response;
-			try {
-				response = await send(ctx, { op: "diff", name: saved.name, diagnostics }, signal);
-				checkGeneration(response, expected);
-				if (response.checkpoint_generation !== saved.generation) throw new Error("Checkpoint generation changed");
-			} catch (error) {
-				if (/unknown checkpoint|Checkpoint generation changed/.test(message(error))) fail(ctx, message(error));
-				throw error;
-			}
-			if (typeof response.diff !== "string") throw new Error("Service returned no diff");
+			const expected = await prepare(ctx, signal, refresh);
+			const response = await compare(ctx, expected, diagnostics, signal);
 			const text = response.diff || "No semantic call-graph changes in the analyzed files since session start.\n";
 			return output(response, baseline, "Locations: '-' uses checkpoint; other lines use queried generation. Ranges are definitions at roots, call sites below.\n" + text, signal);
 		},

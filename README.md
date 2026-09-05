@@ -54,7 +54,8 @@ Successful `edit`/`write` results await path sync. Failed sync adds a warning wi
 file write as failed; the next graph query retries a full reconciliation. Bash/external writes remain
 eventually consistent: use `refresh: true` when freshness matters, even with a healthy watcher.
 
-Checkpoint identity and capture failures survive reload/resume in session metadata. Restarted owners,
+Checkpoint identity and capture failures survive reload/resume in session metadata. Transient
+reload/resume scan or transport failures retain the original identity for retry. Restarted owners,
 forgotten checkpoints, and failed/interrupted capture make the baseline unavailable, never silently
 recaptured. Current-graph queries remain usable. Upgrading from the directory adapter requires a new
 session. Cancellation stops only client requests, not the owner or saved-write acknowledgement;
