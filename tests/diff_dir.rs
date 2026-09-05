@@ -172,6 +172,11 @@ fn rust_use_bindings_preserve_ambiguity_and_unknown_alternatives() {
 }
 
 #[test]
+fn rust_module_lookup_collisions_preserve_all_candidates() {
+    fixture("rust-module-collision");
+}
+
+#[test]
 fn rust_calls_resolve_inside_inline_modules() {
     fixture("rust-inline-module");
 }

@@ -1,0 +1,8 @@
+~ rust:lib.rs::run
+-   rust:worker.rs::work
+-     [unchanged body omitted]
++   [ambiguous: crate::worker::work -> rust:worker.rs::work, rust:worker/mod.rs::work]
++     rust:worker.rs::work
++       [unchanged body omitted]
++     rust:worker/mod.rs::work
++       [unresolved: afterCall]

@@ -1,16 +1,14 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::model::{
-    CallTarget, Language, LocalSymbol, Resolution, RustImport, SourceRange, SymbolKey,
-};
+use crate::model::{CallTarget, LocalSymbol, Resolution, RustImport, SourceRange, SymbolKey};
 
 pub(super) fn resolve(
     caller: &LocalSymbol,
     target: &CallTarget,
     location: &SourceRange,
     imports: &[RustImport],
-    symbols: &[&LocalSymbol],
+    symbols: &super::Index<'_>,
 ) -> Resolution {
     let mut candidates = BTreeSet::new();
     let path = match target {
@@ -97,22 +95,18 @@ fn qualify(module: &[String], path: &[String]) -> Option<Vec<String>> {
     Some(qualified)
 }
 
-fn matching(qualified: &[String], symbols: &[&LocalSymbol]) -> BTreeSet<SymbolKey> {
+fn matching(qualified: &[String], symbols: &super::Index<'_>) -> BTreeSet<SymbolKey> {
     symbols
-        .iter()
-        .filter(|symbol| symbol.key.language == Language::Rust)
-        .filter_map(|symbol| {
-            let mut identity = module(&symbol.key.file);
-            identity.extend_from_slice(&symbol.key.qualified_name);
-            if identity == qualified {
-                return Some(symbol.key.clone());
-            }
-            None
-        })
+        .rust
+        .get(qualified)
+        .into_iter()
+        .flatten()
+        .copied()
+        .cloned()
         .collect()
 }
 
-fn module(file: &str) -> Vec<String> {
+pub(super) fn module(file: &str) -> Vec<String> {
     let path = Path::new(file);
     let mut parts = path
         .parent()

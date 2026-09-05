@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod bench;
 mod rust;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,14 +11,56 @@ use crate::model::{
     SourceRange, SymbolKey,
 };
 
+// Pass-local lookup tables borrow identities; the original symbol stream still
+// reaches graph construction, where duplicate SymbolKeys remain fatal errors.
+#[derive(Default)]
+struct Index<'a> {
+    files: BTreeMap<(Language, &'a str, &'a [String]), Vec<&'a SymbolKey>>,
+    rust: BTreeMap<Vec<String>, Vec<&'a SymbolKey>>,
+}
+
+impl<'a> Index<'a> {
+    fn new(symbols: impl IntoIterator<Item = &'a LocalSymbol>) -> Self {
+        let mut index = Self::default();
+        for symbol in symbols {
+            let key = &symbol.key;
+            index
+                .files
+                .entry((key.language, &key.file, &key.qualified_name))
+                .or_default()
+                .push(key);
+            if key.language == Language::Rust {
+                let mut qualified = rust::module(&key.file);
+                qualified.extend_from_slice(&key.qualified_name);
+                index.rust.entry(qualified).or_default().push(key);
+            }
+        }
+        index
+    }
+
+    fn file(
+        &self,
+        language: Language,
+        file: &str,
+        qualified: &[String],
+        output: &mut BTreeSet<SymbolKey>,
+    ) {
+        output.extend(
+            self.files
+                .get(&(language, file, qualified))
+                .into_iter()
+                .flatten()
+                .copied()
+                .cloned(),
+        );
+    }
+}
+
 pub(crate) fn program<'a>(
     artifacts: impl IntoIterator<Item = &'a FileArtifact>,
 ) -> ResolvedProgram {
     let artifacts = artifacts.into_iter().collect::<Vec<_>>();
-    let all_symbols = artifacts
-        .iter()
-        .flat_map(|artifact| artifact.symbols.iter())
-        .collect::<Vec<_>>();
+    let all_symbols = Index::new(artifacts.iter().flat_map(|artifact| &artifact.symbols));
     let exports = artifacts
         .iter()
         .map(|artifact| (artifact.path.as_str(), artifact.exports.as_slice()))
@@ -40,7 +84,7 @@ fn resolve_steps(
     caller: &LocalSymbol,
     artifact: &FileArtifact,
     exports: &BTreeMap<&str, &[ExportBinding]>,
-    symbols: &[&LocalSymbol],
+    symbols: &Index<'_>,
 ) -> Vec<ResolvedStep> {
     steps
         .iter()
@@ -77,7 +121,7 @@ fn target(
     location: &SourceRange,
     artifact: &FileArtifact,
     exports: &BTreeMap<&str, &[ExportBinding]>,
-    symbols: &[&crate::model::LocalSymbol],
+    symbols: &Index<'_>,
 ) -> Resolution {
     if artifact.language == Language::Rust {
         return rust::resolve(caller, target, location, &artifact.rust_imports, symbols);
@@ -238,19 +282,10 @@ fn resolution(target: &CallTarget, mut candidates: BTreeSet<SymbolKey>) -> Resol
 fn same_file(
     caller: &SymbolKey,
     qualified: &[String],
-    symbols: &[&crate::model::LocalSymbol],
+    symbols: &Index<'_>,
     output: &mut BTreeSet<SymbolKey>,
 ) {
-    output.extend(
-        symbols
-            .iter()
-            .filter(|symbol| {
-                symbol.key.language == caller.language
-                    && symbol.key.file == caller.file
-                    && symbol.key.qualified_name == qualified
-            })
-            .map(|symbol| symbol.key.clone()),
-    );
+    symbols.file(caller.language, &caller.file, qualified, output);
 }
 
 fn static_suffix(path: &[String]) -> Vec<String> {
@@ -267,7 +302,7 @@ fn imported_symbol(
     exported: &ExportName,
     suffix: &[String],
     exports: &BTreeMap<&str, &[ExportBinding]>,
-    symbols: &[&crate::model::LocalSymbol],
+    symbols: &Index<'_>,
     output: &mut BTreeSet<SymbolKey>,
 ) {
     for file in import_files(&caller.file, &import.source) {
@@ -280,16 +315,7 @@ fn imported_symbol(
         {
             let mut qualified = vec![binding.local.clone()];
             qualified.extend_from_slice(suffix);
-            output.extend(
-                symbols
-                    .iter()
-                    .filter(|symbol| {
-                        symbol.key.language == caller.language
-                            && symbol.key.file == file
-                            && symbol.key.qualified_name == qualified
-                    })
-                    .map(|symbol| symbol.key.clone()),
-            );
+            symbols.file(caller.language, &file, &qualified, output);
         }
     }
 }
