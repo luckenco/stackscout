@@ -28,24 +28,27 @@ pub(crate) struct Output {
     pub warning: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct Symbol {
-    id: String,
-    file: String,
-    location: model::SourceRange,
-    depth: usize,
+    pub(crate) id: String,
+    pub(crate) file: String,
+    pub(crate) location: model::SourceRange,
+    pub(crate) depth: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct Call {
-    caller: String,
-    callee: Option<String>,
-    target: String,
-    resolution: &'static str,
-    location: model::SourceRange,
+    pub(crate) caller: String,
+    pub(crate) callee: Option<String>,
+    pub(crate) target: String,
+    pub(crate) resolution: &'static str,
+    pub(crate) location: model::SourceRange,
 }
 
-fn select<'a>(graph: &'a graph::Graph, selector: &str) -> Result<&'a model::SymbolKey, String> {
+pub(crate) fn select<'a>(
+    graph: &'a graph::Graph,
+    selector: &str,
+) -> Result<&'a model::SymbolKey, String> {
     let mut name = selector;
     let mut qualified = false;
     let keys: Box<dyn Iterator<Item = &model::SymbolKey>> = if let Some((language, rest)) =
@@ -98,7 +101,7 @@ fn select<'a>(graph: &'a graph::Graph, selector: &str) -> Result<&'a model::Symb
 }
 
 // Charge encoded bytes before retaining items, including JSON escaping. Reserve envelope space.
-fn fits(value: &impl Serialize, bytes: &mut usize) -> bool {
+pub(crate) fn fits(value: &impl Serialize, bytes: &mut usize) -> bool {
     let size = serde_json::to_vec(value)
         .expect("query data is serializable")
         .len()

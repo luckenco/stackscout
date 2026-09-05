@@ -171,7 +171,7 @@ fn minimal_roots(candidates: &BTreeSet<SymbolKey>, graph: &Graph) -> BTreeSet<Sy
         .collect()
 }
 
-fn changed(key: &SymbolKey, before: &Graph, after: &Graph) -> bool {
+pub(crate) fn changed(key: &SymbolKey, before: &Graph, after: &Graph) -> bool {
     match (before.symbols.get(key), after.symbols.get(key)) {
         (Some(before), Some(after)) => before.local_shape() != after.local_shape(),
         (None, None) => false,

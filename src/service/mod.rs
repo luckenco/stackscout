@@ -4,6 +4,7 @@
 //! A single writer builds updates while bounded connection workers query immutable generations.
 
 mod protocol;
+mod review;
 #[cfg(test)]
 mod tests;
 mod unix;
@@ -36,6 +37,8 @@ struct Generation {
 struct State {
     current: Option<Arc<Generation>>,
     checkpoints: BTreeMap<String, Arc<Generation>>,
+    reviews: BTreeMap<String, review::Checkpoint>,
+    next_review: u64,
     progress: Option<protocol::Progress>,
     last_error: Option<String>,
     files_parsed: usize,
@@ -70,6 +73,10 @@ impl Shared {
             checkpoint_generation: None,
             diff: None,
             graph: None,
+            review: None,
+            review_name: None,
+            review_token: None,
+            review_initialized: false,
             truncated: false,
             error: None,
         }
@@ -89,6 +96,12 @@ struct Update {
 }
 
 fn query(shared: &Shared, operation: Operation) -> Response {
+    if matches!(
+        operation,
+        Operation::Review { .. } | Operation::Acknowledge { .. } | Operation::ForgetReview { .. }
+    ) {
+        return review::run(shared, operation);
+    }
     let mut state = shared.state.lock().expect("service state poisoned");
     let mut response = shared.response(&state);
     if matches!(operation, Operation::Status {}) {
@@ -123,7 +136,9 @@ fn query(shared: &Shared, operation: Operation) -> Response {
         Operation::Checkpoint { name } => {
             if name.is_empty() || name.len() > 256 {
                 response.error = Some("checkpoint names must contain 1–256 bytes".to_owned());
-            } else if state.checkpoints.len() >= 64 && !state.checkpoints.contains_key(&name) {
+            } else if state.checkpoints.len() + 2 * state.reviews.len() >= 64
+                && !state.checkpoints.contains_key(&name)
+            {
                 response.error =
                     Some("checkpoint limit reached; forget unused checkpoints".to_owned());
             } else {

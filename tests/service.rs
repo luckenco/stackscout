@@ -717,6 +717,144 @@ fn protocol_errors_and_output_limits_are_explicit() {
 }
 
 #[test]
+fn scoped_reviews_acknowledge_only_the_inspected_generation_and_scope() {
+    let mut workspace = Workspace::new();
+    let root = workspace.root.clone();
+    fs::write(
+        root.join("lib.rs"),
+        "fn run() { work(); } fn work() {} fn unrelated() {}",
+    )
+    .unwrap();
+    workspace.start();
+    request(&root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    request(&root, r#"{"version":1,"op":"checkpoint","name":"session"}"#);
+    fs::write(
+        root.join("lib.rs"),
+        "fn run() { work(); } fn work() { first(); } fn unrelated() { noise(); }",
+    )
+    .unwrap();
+    request(&root, r#"{"version":1,"op":"sync","paths":["lib.rs"]}"#);
+    let review = || {
+        request(
+            &root,
+            r#"{"version":1,"op":"review","name":"api","baseline":"session","baseline_generation":1,"scope":{"symbols":["run"]}}"#,
+        )
+    };
+    let inspected = review();
+    assert!(inspected["error"].is_null(), "{inspected}");
+    assert_eq!(inspected["generation"], 2);
+    assert_eq!(inspected["checkpoint_generation"], 1);
+    assert_eq!(inspected["review_initialized"], true);
+    let evidence = inspected["review"].to_string();
+    assert!(evidence.contains("dependency"));
+    assert!(evidence.contains("first"));
+    assert!(!evidence.contains("noise"));
+    fs::write(
+        root.join("lib.rs"),
+        "fn run() { work(); } fn work() { later(); } fn unrelated() { noise(); }",
+    )
+    .unwrap();
+    request(&root, r#"{"version":1,"op":"sync","paths":["lib.rs"]}"#);
+    let ack = format!(
+        r#"{{"version":1,"op":"acknowledge","name":"api","token":{}}}"#,
+        inspected["review_token"]
+    );
+    for _ in 0..2 {
+        let response = request(&root, &ack);
+        assert!(response["error"].is_null(), "{response}");
+        assert_eq!(response["generation"], 3);
+        assert_eq!(response["checkpoint_generation"], 2);
+    }
+    let later = review();
+    assert_eq!(later["checkpoint_generation"], 2);
+    assert!(later["review"].to_string().contains("later"));
+    assert_eq!(later["review_initialized"], false);
+    let other = request(
+        &root,
+        r#"{"version":1,"op":"review","name":"other","baseline":"session","baseline_generation":1,"scope":{"symbols":["unrelated"]}}"#,
+    );
+    assert_eq!(other["checkpoint_generation"], 1);
+    assert!(other["review"].to_string().contains("noise"));
+    let baseline = request(&root, r#"{"version":1,"op":"diff","name":"session"}"#);
+    assert_eq!(baseline["checkpoint_generation"], 1);
+    assert!(baseline["diff"].as_str().unwrap().contains("noise"));
+    let newer = review();
+    let stale = format!(
+        r#"{{"version":1,"op":"acknowledge","name":"api","token":{}}}"#,
+        later["review_token"]
+    );
+    assert!(
+        request(&root, &stale)["error"]
+            .as_str()
+            .unwrap()
+            .contains("stale")
+    );
+    let ack = format!(
+        r#"{{"version":1,"op":"acknowledge","name":"api","token":{}}}"#,
+        newer["review_token"]
+    );
+    assert!(request(&root, &ack)["error"].is_null());
+    assert!(
+        review()["review"]["witnesses"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(request(&root, r#"{"version":1,"op":"review","name":"api","baseline":"session","baseline_generation":1,"scope":{"files":["lib.rs"]}}"#)["error"].is_string());
+    assert!(request(&root, r#"{"version":1,"op":"review","name":"missing","baseline":"absent","baseline_generation":1,"scope":{"symbols":["run"]}}"#)["error"].is_string());
+    // Rolling results replace pins instead of consuming one name per query.
+    for _ in 0..70 {
+        assert!(review()["error"].is_null());
+    }
+    for index in 0..59 {
+        assert!(
+            request(
+                &root,
+                &format!(r#"{{"version":1,"op":"checkpoint","name":"cp{index}"}}"#)
+            )["error"]
+                .is_null()
+        );
+    }
+    assert!(
+        request(
+            &root,
+            r#"{"version":1,"op":"checkpoint","name":"overflow"}"#
+        )["error"]
+            .is_string()
+    );
+    assert!(
+        request(
+            &root,
+            r#"{"version":1,"op":"forget_review","name":"other"}"#
+        )["error"]
+            .is_null()
+    );
+    assert!(
+        request(
+            &root,
+            r#"{"version":1,"op":"checkpoint","name":"overflow"}"#
+        )["error"]
+            .is_null()
+    );
+    // An explicitly forgotten review can only reset back to the original checkpoint, not current.
+    request(&root, r#"{"version":1,"op":"forget_review","name":"api"}"#);
+    assert!(request(&root, &ack)["error"].is_string());
+    let reset = review();
+    assert_eq!(reset["review_initialized"], true);
+    assert_eq!(reset["checkpoint_generation"], 1);
+    // Recreating a lost session checkpoint at a later generation cannot seed a late review.
+    request(&root, r#"{"version":1,"op":"forget_review","name":"api"}"#);
+    request(&root, r#"{"version":1,"op":"forget","name":"session"}"#);
+    request(&root, r#"{"version":1,"op":"checkpoint","name":"session"}"#);
+    assert!(
+        review()["error"]
+            .as_str()
+            .unwrap()
+            .contains("checkpoint generation changed")
+    );
+}
+
+#[test]
 fn frame_and_checkpoint_limits_are_enforced() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::Shutdown;

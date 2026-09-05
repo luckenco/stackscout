@@ -47,6 +47,19 @@ pub(super) enum Operation {
         #[serde(default)]
         diagnostics: bool,
     },
+    Review {
+        name: String,
+        baseline: String,
+        baseline_generation: u64,
+        scope: crate::review::Scope,
+    },
+    Acknowledge {
+        name: String,
+        token: String,
+    },
+    ForgetReview {
+        name: String,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -87,6 +100,10 @@ pub(super) struct Response {
     pub checkpoint_generation: Option<u64>,
     pub diff: Option<String>,
     pub graph: Option<crate::query::Output>,
+    pub review: Option<crate::review::Output>,
+    pub review_name: Option<String>,
+    pub review_token: Option<String>,
+    pub review_initialized: bool,
     pub truncated: bool,
     pub error: Option<String>,
 }

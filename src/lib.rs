@@ -9,6 +9,8 @@ mod render;
 mod repository;
 mod resolve;
 #[cfg(unix)]
+mod review;
+#[cfg(unix)]
 pub mod service;
 
 pub use repository::Repository;

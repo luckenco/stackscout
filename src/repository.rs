@@ -271,6 +271,43 @@ impl Snapshot {
         ))
     }
 
+    #[cfg(unix)]
+    pub(crate) fn review(
+        &self,
+        after: &Self,
+        scope: &crate::review::Scope,
+    ) -> Result<crate::review::Output, Error> {
+        let issues = self.issues().chain(after.issues()).collect::<Vec<_>>();
+        let omitted = issues
+            .iter()
+            .map(|issue| issue.path.clone())
+            .collect::<BTreeSet<_>>();
+        if omitted.is_empty() {
+            return Ok(crate::review::compare(&self.graph, &after.graph, scope));
+        }
+        // Preserve the diff contract: analysis failures are not symbol deletions/additions.
+        let mut output =
+            crate::review::compare(&self.without(&omitted)?, &after.without(&omitted)?, scope);
+        output.truncated |= issues.len() > 32;
+        output.analysis_issues = issues
+            .iter()
+            .take(32)
+            .map(|issue| {
+                let mut text = issue.message();
+                if text.len() > 2048 {
+                    let mut end = 2048;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                    text.push_str(" [truncated]");
+                }
+                text
+            })
+            .collect();
+        Ok(output)
+    }
+
     fn without(&self, omitted: &BTreeSet<String>) -> Result<graph::Graph, Error> {
         crate::build(self.files.iter().filter_map(|(path, file)| {
             if omitted.contains(path) {
