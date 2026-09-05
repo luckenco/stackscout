@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -12,13 +12,38 @@ import {
 import { Type } from "typebox";
 
 const READY = ".ready-v2";
+const FAILURE = "stackscout-baseline-failure";
+
+type Baseline =
+	| { status: "ready"; path: string }
+	| { status: "unavailable"; reason: string };
 
 export default function (pi: ExtensionAPI) {
-	let baseline: Promise<string> | undefined;
+	let baseline: Baseline = { status: "unavailable", reason: "Session initialization has not completed" };
 
-	pi.on("session_start", (_event, ctx) => {
-		baseline = ensureBaseline(pi, ctx.cwd, ctx.sessionManager.getSessionId());
-		return baseline.then(() => undefined);
+	pi.on("session_start", async (_event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		// Failures belong to the session, including across reload/resume, but not forks.
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== FAILURE) continue;
+			const data = entry.data as { sessionId?: string; reason?: string } | undefined;
+			if (data?.sessionId === sessionId && typeof data.reason === "string") {
+				baseline = { status: "unavailable", reason: data.reason };
+				report(ctx, unavailable(baseline.reason));
+				return;
+			}
+		}
+		try {
+			baseline = { status: "ready", path: await ensureBaseline(pi, ctx) };
+		} catch (error) {
+			baseline = { status: "unavailable", reason: message(error) };
+			report(ctx, unavailable(baseline.reason));
+			try {
+				pi.appendEntry(FAILURE, { sessionId, reason: baseline.reason });
+			} catch (saveError) {
+				report(ctx, `Could not persist StackScout baseline failure: ${message(saveError)}`);
+			}
+		}
 	});
 
 	pi.registerTool({
@@ -31,8 +56,11 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-			const snapshot = await (baseline ??=
-				ensureBaseline(pi, ctx.cwd, ctx.sessionManager.getSessionId()));
+			signal?.throwIfAborted();
+			if (baseline.status === "unavailable") {
+				throw new Error(unavailable(baseline.reason));
+			}
+			const snapshot = baseline.path;
 			const result = await pi.exec(
 				"cargo",
 				[
@@ -47,6 +75,7 @@ export default function (pi: ExtensionAPI) {
 				],
 				{ cwd: ctx.cwd, signal },
 			);
+			signal?.throwIfAborted();
 			if (result.code !== 0) {
 				throw new Error(result.stderr.trim() || result.stdout.trim() || "StackScout failed");
 			}
@@ -73,15 +102,36 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-async function ensureBaseline(pi: ExtensionAPI, cwd: string, sessionId: string): Promise<string> {
-	const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+function message(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
+function unavailable(reason: string): string {
+	return `Session-start baseline unavailable: ${reason}. Start a new session to capture a new baseline.`;
+}
+
+function report(ctx: ExtensionContext, text: string) {
+	if (ctx.hasUI) {
+		ctx.ui.notify(text, "error");
+	} else {
+		console.error(text);
+	}
+}
+
+async function ensureBaseline(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
+	const cwd = ctx.cwd;
+	const key = createHash("sha256").update(ctx.sessionManager.getSessionId()).digest("hex").slice(0, 16);
 	const baseline = join(cwd, ".pi", "stackscout-baselines", key);
 	try {
 		await readFile(join(baseline, READY));
 		return baseline;
-	} catch {
-		await rm(baseline, { recursive: true, force: true });
+	} catch (error) {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+			throw error;
+		}
 	}
+	await rm(baseline, { recursive: true, force: true });
 
 	const files = await pi.exec(
 		"rg",
@@ -111,12 +161,21 @@ async function ensureBaseline(pi: ExtensionAPI, cwd: string, sessionId: string):
 		throw new Error(files.stderr.trim() || "Could not list source files for StackScout baseline");
 	}
 
-	await mkdir(baseline, { recursive: true });
-	for (const path of files.stdout.split("\0").filter(Boolean)) {
-		const destination = join(baseline, path);
-		await mkdir(dirname(destination), { recursive: true });
-		await copyFile(join(cwd, path), destination);
+	try {
+		await mkdir(baseline, { recursive: true });
+		for (const path of files.stdout.split("\0").filter(Boolean)) {
+			const destination = join(baseline, path);
+			await mkdir(dirname(destination), { recursive: true });
+			await copyFile(join(cwd, path), destination);
+		}
+		await writeFile(join(baseline, READY), "", "utf8");
+		return baseline;
+	} catch (error) {
+		try {
+			await rm(baseline, { recursive: true, force: true });
+		} catch (cleanupError) {
+			report(ctx, `Could not remove incomplete StackScout baseline ${baseline}: ${message(cleanupError)}`);
+		}
+		throw error;
 	}
-	await writeFile(join(baseline, READY), "", "utf8");
-	return baseline;
 }

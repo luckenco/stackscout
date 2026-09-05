@@ -40,7 +40,10 @@ stackscout diff-dir [--diagnostics] <before-directory> <after-directory>
 ```
 
 The repo-local Pi extension snapshots supported source files at session start and exposes this diff
-through `call_graph_diff`.
+through `call_graph_diff`. Completed snapshots are retained for resumed sessions. If capture fails,
+the tool reports the failure and requires a new session; it never lazily snapshots after edits.
+The failure is retained in Pi session metadata across reload/resume. Cancelling a tool call only
+cancels its Cargo command, not session baseline capture.
 
 For example, adding an `audit` call inside `save` can produce:
 
@@ -90,6 +93,18 @@ TypeScript type-driven method resolution, generated code, and calls outside the 
 remain unresolved. Parse-failure transitions are reported as incomplete rather than presented as
 trustworthy results. Unchanged failures are hidden by default; `--diagnostics` includes their full
 details.
+
+## Checks
+
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+bun test tests/pi_extension.test.ts
+```
+
+The Pi lifecycle tests use temporary source directories and a stub Pi API; they require Bun
+but no npm dependency installation. They do not exercise Pi's loader or Cargo integration.
 
 ## License
 
