@@ -1,0 +1,7 @@
+~ rust:lib.rs::run
+-   [unresolved: repo.change("lib.rs")::unwrap]
++   [unresolved: repo.change("lib::rs")::unwrap]
+
+~ ts:main.ts::run
+-   [unresolved: repo.change("lib.ts")::unwrap]
++   [unresolved: repo.change("lib::ts")::unwrap]

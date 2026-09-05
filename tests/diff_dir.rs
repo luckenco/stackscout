@@ -85,6 +85,21 @@ fn unresolved_changes_are_shown_without_unchanged_unresolved_noise() {
 }
 
 #[test]
+fn rust_call_literals_are_preserved() {
+    fixture("rust-call-literals");
+}
+
+#[test]
+fn typescript_call_literals_are_preserved() {
+    fixture("typescript-call-literals");
+}
+
+#[test]
+fn distinct_call_literals_remain_distinct_changes() {
+    fixture("call-literal-transition");
+}
+
+#[test]
 fn ambiguous_calls_show_which_possible_callee_changed() {
     fixture("ambiguous-impact");
 }

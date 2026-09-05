@@ -585,19 +585,12 @@ fn call_target(
             Ok(Some(CallTarget::Bare(name)))
         }
         "member_expression" => {
-            let Some(object) = node.child_by_field_name("object") else {
+            let Some(parts) = target_parts(path, source, node)? else {
                 return Ok(None);
             };
-            let Some(property) = node.child_by_field_name("property") else {
-                return Ok(None);
-            };
-            let object = text(path, source, object)?;
-            let property = text(path, source, property)?.to_owned();
-            if object == "this" {
-                return Ok(Some(CallTarget::ThisMethod(property)));
+            if parts.len() == 2 && parts[0] == "this" {
+                return Ok(Some(CallTarget::ThisMethod(parts[1].clone())));
             }
-            let mut parts = object.split('.').map(str::to_owned).collect::<Vec<_>>();
-            parts.push(property);
             Ok(Some(CallTarget::Path(parts)))
         }
         _ => Ok(None),
@@ -611,12 +604,21 @@ fn target_parts(
 ) -> Result<Option<Vec<String>>, AnalyzeError> {
     match node.kind() {
         "identifier" => Ok(Some(vec![text(path, source, node)?.to_owned()])),
-        "member_expression" => Ok(Some(
-            text(path, source, node)?
-                .split('.')
-                .map(str::to_owned)
-                .collect(),
-        )),
+        "member_expression" => {
+            let Some(object) = node.child_by_field_name("object") else {
+                return Ok(None);
+            };
+            let Some(property) = node.child_by_field_name("property") else {
+                return Ok(None);
+            };
+            let mut parts = match target_parts(path, source, object)? {
+                Some(parts) => parts,
+                // Calls and other receiver expressions retain their exact source text.
+                None => vec![text(path, source, object)?.to_owned()],
+            };
+            parts.push(text(path, source, property)?.to_owned());
+            Ok(Some(parts))
+        }
         _ => Ok(None),
     }
 }

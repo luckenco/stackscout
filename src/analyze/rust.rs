@@ -277,17 +277,31 @@ fn call_target(
             let Some(field) = node.child_by_field_name("field") else {
                 return Ok(None);
             };
-            let value = text(path, source, value)?;
             let field = text(path, source, field)?.to_owned();
-            if value == "self" {
+            if text(path, source, value)? == "self" {
                 return Ok(Some(CallTarget::SelfMethod(field)));
             }
-            let mut parts = value.split('.').map(str::to_owned).collect::<Vec<_>>();
+            let mut parts = field_parts(path, source, value)?;
             parts.push(field);
             Ok(Some(CallTarget::Path(parts)))
         }
         _ => Ok(None),
     }
+}
+
+fn field_parts(path: &str, source: &str, node: Node<'_>) -> Result<Vec<String>, AnalyzeError> {
+    if node.kind() == "field_expression"
+        && let (Some(value), Some(field)) = (
+            node.child_by_field_name("value"),
+            node.child_by_field_name("field"),
+        )
+    {
+        let mut parts = field_parts(path, source, value)?;
+        parts.push(text(path, source, field)?.to_owned());
+        return Ok(parts);
+    }
+    // Calls and other receiver expressions are opaque, including their literals.
+    Ok(vec![text(path, source, node)?.to_owned()])
 }
 
 fn required_field<'a>(

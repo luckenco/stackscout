@@ -1,0 +1,8 @@
+~ rust:lib.rs::run
++   [unresolved: repo.change("lib.rs", b"./worker", r#"a.b::c"#, 1.25, '.')::unwrap]
++   [unresolved: repo::change]
++   [unresolved: repo.state.change("lib.rs")::result::finish]
++   [unresolved: repo::state::change]
++   [unresolved: "lib.rs"::len]
++   [unresolved: (1.25_f64)::abs]
++   [unresolved: workers["./worker"]::run]

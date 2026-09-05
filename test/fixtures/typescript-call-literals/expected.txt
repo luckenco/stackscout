@@ -1,0 +1,10 @@
+~ ts:main.ts::run
++   [unresolved: repo.change("lib.ts", './worker', `a.b::${suffix}`, /a\.b/, 1.25)::unwrap]
++   [unresolved: repo::change]
++   [unresolved: repo.state.change("lib.ts")::result::finish]
++   [unresolved: repo::state::change]
++   [unresolved: new (lookup("./worker")).Worker]
++   [unresolved: lookup]
++   [unresolved: "lib.ts"::trim]
++   [unresolved: (1.25)::toFixed]
++   [unresolved: workers["./worker"]::run]
