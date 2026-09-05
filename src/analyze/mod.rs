@@ -8,17 +8,10 @@ use thiserror::Error;
 use tree_sitter::{Node, Parser};
 
 use crate::discover;
-use crate::model::{FileArtifact, Language, SourceRange};
+use crate::model::{FileArtifact, Language, SourceRange, Syntax};
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum AnalyzeError {
-    #[error(transparent)]
-    Discover(#[from] discover::DiscoverError),
-    #[error("failed to read {path}: {source}")]
-    Read {
-        path: String,
-        source: std::io::Error,
-    },
     #[error("failed to configure the {language} parser: {message}")]
     Parser {
         language: &'static str,
@@ -34,33 +27,19 @@ pub(crate) enum AnalyzeError {
     Unsupported { path: String, message: String },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Issue {
     pub(crate) path: String,
     error: AnalyzeError,
 }
 
 impl Issue {
-    fn new(path: String, error: AnalyzeError) -> Self {
+    pub(crate) fn new(path: String, error: AnalyzeError) -> Self {
         Self { path, error }
     }
 
     pub(crate) fn same_as(&self, other: &Self) -> bool {
-        match (&self.error, &other.error) {
-            (AnalyzeError::Rejected(_), AnalyzeError::Rejected(_)) => true,
-            (
-                AnalyzeError::Syntax { line: before, .. },
-                AnalyzeError::Syntax { line: after, .. },
-            ) => before == after,
-            (AnalyzeError::InvalidNode(_), AnalyzeError::InvalidNode(_)) => true,
-            (
-                AnalyzeError::Unsupported {
-                    message: before, ..
-                },
-                AnalyzeError::Unsupported { message: after, .. },
-            ) => before == after,
-            _ => false,
-        }
+        self == other
     }
 
     pub(crate) fn message(&self) -> String {
@@ -73,10 +52,15 @@ pub(crate) struct Directory {
     pub(crate) issues: Vec<Issue>,
 }
 
+// Bump when extraction semantics change. Parser mode distinguishes TS from TSX.
+pub(crate) const VERSION: u32 = 1;
+
 pub(crate) struct Analyzers {
     rust: Parser,
     typescript: Parser,
     tsx: Parser,
+    #[cfg(test)]
+    pub(crate) parsed: Vec<String>,
 }
 
 impl Analyzers {
@@ -88,17 +72,18 @@ impl Analyzers {
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             )?,
             tsx: parser("TSX", tree_sitter_typescript::LANGUAGE_TSX.into())?,
+            #[cfg(test)]
+            parsed: Vec::new(),
         })
     }
 
-    pub(crate) fn directory(&mut self, root: &Path) -> Result<Directory, AnalyzeError> {
+    pub(crate) fn directory(&mut self, root: &Path) -> Result<Directory, crate::Error> {
         let mut artifacts = Vec::new();
         let mut issues = Vec::new();
         for path in discover::sources(root)? {
             let relative = discover::relative(root, &path)?;
-            let source = fs::read_to_string(&path).map_err(|source| AnalyzeError::Read {
-                path: relative.clone(),
-                source,
+            let source = fs::read_to_string(&path).map_err(|error| crate::Error {
+                message: format!("failed to read {relative}: {error}"),
             })?;
             match self.file(&relative, &source) {
                 Ok(artifact) => artifacts.push(artifact),
@@ -108,15 +93,21 @@ impl Analyzers {
         Ok(Directory { artifacts, issues })
     }
 
-    fn file(&mut self, path: &str, source: &str) -> Result<FileArtifact, AnalyzeError> {
-        let (language, parser) = match Path::new(path).extension().and_then(|value| value.to_str())
-        {
-            Some("rs") => (Language::Rust, &mut self.rust),
-            Some("ts" | "mts" | "cts") => (Language::TypeScript, &mut self.typescript),
-            Some("tsx") => (Language::TypeScript, &mut self.tsx),
-            _ => unreachable!("discovery only returns supported extensions"),
+    pub(crate) fn file(&mut self, path: &str, source: &str) -> Result<FileArtifact, AnalyzeError> {
+        let (language, parser) = match Syntax::for_path(Path::new(path)) {
+            Some(Syntax::Rust) => (Language::Rust, &mut self.rust),
+            Some(Syntax::TypeScript) => (Language::TypeScript, &mut self.typescript),
+            Some(Syntax::Tsx) => (Language::TypeScript, &mut self.tsx),
+            None => {
+                return Err(AnalyzeError::Unsupported {
+                    path: path.to_owned(),
+                    message: "unsupported source extension".to_owned(),
+                });
+            }
         };
 
+        #[cfg(test)]
+        self.parsed.push(path.to_owned());
         let tree = parser
             .parse(source, None)
             .ok_or_else(|| AnalyzeError::Rejected(path.to_owned()))?;

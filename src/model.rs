@@ -1,4 +1,28 @@
 use std::fmt;
+use std::path::Path;
+
+/// Parser mode, including the TS/TSX distinction within the TypeScript language.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Syntax {
+    Rust,
+    TypeScript,
+    Tsx,
+}
+
+impl Syntax {
+    pub(crate) fn for_path(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str().unwrap_or("");
+        if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
+            return None;
+        }
+        match path.extension()?.to_str()? {
+            "rs" => Some(Self::Rust),
+            "ts" | "mts" | "cts" => Some(Self::TypeScript),
+            "tsx" => Some(Self::Tsx),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Language {

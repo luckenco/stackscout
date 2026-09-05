@@ -33,7 +33,7 @@ impl GraphNode {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Graph {
     pub(crate) symbols: BTreeMap<SymbolKey, GraphNode>,
     pub(crate) incoming: BTreeMap<SymbolKey, BTreeSet<SymbolKey>>,

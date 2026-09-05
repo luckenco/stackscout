@@ -27,7 +27,7 @@ StackScout may help with this workflow, or simply provide a faster way to inspec
 
 ## What it does today
 
-StackScout is currently a one-shot directory diff for Rust and TypeScript. It:
+StackScout provides a one-shot directory CLI and an in-memory Rust API for Rust and TypeScript. It:
 
 - parses `.rs`, `.ts`, `.tsx`, `.mts`, and `.cts` files with Tree-sitter;
 - builds a static call graph for each directory;
@@ -51,17 +51,37 @@ For example, adding an `audit` call inside `save` can produce:
       ts:store.ts::insert
 ```
 
+## In-memory Rust API
+
+```rust
+let mut repo = stackscout::Repository::new()?;
+repo.change("lib.rs", b"pub fn run() {}")?;
+repo.checkpoint("session");
+repo.change("lib.rs", b"pub fn run() { audit(); } fn audit() {}")?;
+println!("{}", repo.diff("session")?);
+```
+
+`change` accepts repository-relative paths and source bytes; `delete` removes a file.
+Neither reads the filesystem. An unchanged content hash and parser identity skip parsing
+and graph rebuilding, including for cached syntax failures. Named checkpoints remain
+queryable after later updates. `diff_with_diagnostics` includes unchanged issue details.
+
+Updates parse only the changed file, but still rebuild resolution and all graph edges from
+cached artifacts. Checkpoints clone artifacts, diagnostics, and graph, so retained memory
+grows with the number of checkpoints. There is no persistent cache or bulk-ingestion API yet.
+The CLI and Pi extension still use one-shot directory comparisons, not this incremental API.
+
 ## What it does not do
 
 StackScout is an early prototype. It does **not** currently:
 
 - keep a daemon or shared repository index running;
-- update its graph incrementally when a file changes;
+- automatically feed file changes into the incremental API;
 - know about concurrent coding-agent sessions;
 - let one agent inspect another agent's live changes;
-- provide named checkpoints or VCS revision lookup;
+- provide VCS revision lookup;
 - expose MCP, editor, or coding-agent integrations beyond the bundled Pi extension;
-- avoid rescanning both directories on every run;
+- avoid rescanning both directories on every CLI or Pi diff;
 - support languages other than Rust and TypeScript; or
 - provide compiler- or typechecker-complete call resolution.
 

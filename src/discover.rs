@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 use thiserror::Error;
 
+use crate::model::Syntax;
+
 #[derive(Debug, Error)]
 pub(crate) enum DiscoverError {
     #[error("source directory does not exist: {0}")]
@@ -24,18 +26,7 @@ pub(crate) fn sources(root: &Path) -> Result<Vec<PathBuf>, DiscoverError> {
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("");
-        if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
-            continue;
-        }
-        if matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("rs" | "ts" | "tsx" | "mts" | "cts")
-        ) {
+        if Syntax::for_path(entry.path()).is_some() {
             paths.push(entry.into_path());
         }
     }

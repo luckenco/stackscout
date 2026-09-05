@@ -4,14 +4,17 @@ mod discover;
 mod graph;
 mod model;
 mod render;
+mod repository;
 mod resolve;
+
+pub use repository::Repository;
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use thiserror::Error;
 
-/// A fatal error produced while discovering, reading, or constructing a graph.
+/// A fatal error produced by source input, graph construction, or checkpoint lookup.
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub struct Error {
@@ -20,6 +23,14 @@ pub struct Error {
 
 impl From<analyze::AnalyzeError> for Error {
     fn from(error: analyze::AnalyzeError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<discover::DiscoverError> for Error {
+    fn from(error: discover::DiscoverError) -> Self {
         Self {
             message: error.to_string(),
         }
@@ -78,26 +89,28 @@ fn compare_dirs(before: &Path, after: &Path, diagnostics: bool) -> Result<String
         .artifacts
         .retain(|artifact| !omitted.contains(&artifact.path));
 
-    let before_graph = build(before.artifacts)?;
-    let after_graph = build(after.artifacts)?;
+    let before_graph = build(&before.artifacts)?;
+    let after_graph = build(&after.artifacts)?;
     let graph_diff = render::render(&diff::compare(&before_graph, &after_graph));
     Ok(render_issues(
-        &before.issues,
-        &after.issues,
+        &before.issues.iter().collect::<Vec<_>>(),
+        &after.issues.iter().collect::<Vec<_>>(),
         &omitted,
         graph_diff,
         diagnostics,
     ))
 }
 
-fn build(artifacts: Vec<model::FileArtifact>) -> Result<graph::Graph, Error> {
-    let program = resolve::program(&artifacts);
+fn build<'a>(
+    artifacts: impl IntoIterator<Item = &'a model::FileArtifact>,
+) -> Result<graph::Graph, Error> {
+    let program = resolve::program(artifacts);
     Ok(graph::build(program)?)
 }
 
 fn render_issues(
-    before: &[analyze::Issue],
-    after: &[analyze::Issue],
+    before: &[&analyze::Issue],
+    after: &[&analyze::Issue],
     omitted: &BTreeSet<String>,
     graph_diff: String,
     diagnostics: bool,

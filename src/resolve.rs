@@ -7,7 +7,10 @@ use crate::model::{
     SymbolKey,
 };
 
-pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
+pub(crate) fn program<'a>(
+    artifacts: impl IntoIterator<Item = &'a FileArtifact>,
+) -> ResolvedProgram {
+    let artifacts = artifacts.into_iter().collect::<Vec<_>>();
     let all_symbols = artifacts
         .iter()
         .flat_map(|artifact| artifact.symbols.iter())
@@ -22,7 +25,7 @@ pub(crate) fn program(artifacts: &[FileArtifact]) -> ResolvedProgram {
         .collect::<BTreeMap<_, _>>();
 
     let mut symbols = Vec::new();
-    for artifact in artifacts {
+    for artifact in &artifacts {
         for symbol in &artifact.symbols {
             symbols.push(ResolvedSymbol {
                 symbol: symbol.clone(),
