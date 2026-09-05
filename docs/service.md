@@ -5,18 +5,7 @@ index and immutable generations. The [repo-local Pi extension](../README.md#pi) 
 
 ## Run
 
-```sh
-cargo build
-target/debug/stackscout serve /path/to/workspace  # foreground; stop with Ctrl-C
-# request connects or starts an owner:
-target/debug/stackscout request . '{"version":1,"op":"status"}'
-target/debug/stackscout request . '{"version":1,"op":"sync","paths":[]}'
-target/debug/stackscout request . '{"version":1,"op":"checkpoint","name":"session"}'
-# After editing src/lib.rs:
-target/debug/stackscout request . '{"version":1,"op":"sync","paths":["src/lib.rs"]}'
-target/debug/stackscout request . '{"version":1,"op":"diff","name":"session"}'
-target/debug/stackscout request . '{"version":1,"op":"impact","symbol":"rust:src/lib.rs::diff_dirs","depth":8,"limit":64}'
-```
+Build and connect with the [README commands](../README.md#repository-service).
 
 Check JSON `error` even when the CLI exits successfully; transport/startup failures exit
 unsuccessfully. Rust `service::request` connects only; the CLI owns subprocess startup.
@@ -73,10 +62,9 @@ Queries pin one generation and traverse outside the publication lock. Responses 
 | `truncated` | Graph/review limits or diff depth/node/48-KiB limit reached. Diff byte cuts preserve UTF-8 and append a marker. |
 | `review`, `review_name`, `review_token`, `review_initialized` | Scoped evidence, review identity, acknowledgement token, and whether seeded from the original checkpoint on this request; otherwise null/false. |
 
-Service diff text includes file-qualified ranges. `-` lines use checkpoint locations; other
-lines use the queried generation. Roots show definition ranges; descendants show call/branch
-sites (including the caller's file for cross-file calls), not callee definitions. Deleted-file
-locations remain available from the checkpoint. Directory/API diffs keep their compact format.
+Diff ranges: `-` lines use checkpoint locations, others the queried generation. Roots show
+definitions; descendants show call/branch sites in the caller's file. Deleted-file locations
+survive in checkpoints. Directory/API diffs retain compact formatting.
 
 Watching is eventually consistent even when health is green. Await explicit path sync to
 acknowledge known writes; protocol v1 has no minimum-generation query parameter. Scans read
@@ -144,7 +132,6 @@ Retained evidence is bounded while constructed: 64 witnesses, 32 boundaries, 32 
 (including escaping), plus at most 32 diagnostics of 2 KiB each. Narrow scopes when truncated.
 Repeated roots may repeat evidence. Traversals reuse the bounded query implementation, not full diff
 trees; selection/local-shape comparisons and rebuilding graphs around analysis failures remain costs.
-No new latency or token-savings claim is established by these limits.
 
 A successful review returns an instance-qualified token and pins the exact `generation` it compared.
 It does **not** advance the review checkpoint. `acknowledge` advances to that pinned generation even
@@ -156,13 +143,11 @@ before its token can be acknowledged. Disconnect/cancellation can leave a pendin
 acknowledgement; mutations are not replayed automatically. Retry the same acknowledgement token if
 its reply was lost, or inspect a new review if superseded.
 
-Acknowledgement is explicit acceptance of the inspected **bounded, advisory** result, including its
-reported uncertainty/omissions; it is not proof that every relevant path was analyzed. Inspect source
-and omitted evidence first. The immutable session checkpoint never changes. Rolling results replace
-pins rather than accumulating names. Forget releases both review pins; requesting that review again
-explicitly reports `review_initialized: true` and seeds from the original checkpoint, never current
-worktree state. Missing/replaced seed checkpoints fail. Restarts lose reviews/tokens along with all
-checkpoints; Pi refuses to recreate its lost session baseline. Owners do not automatically evict.
+Acknowledge only after inspecting source and reported omissions: results are **bounded, advisory**,
+not proof of completeness. The session checkpoint never changes. Rolling results replace pins.
+Forget releases both pins; next use reports `review_initialized: true` and resets to the original
+checkpoint. Missing/replaced seeds fail. Restarts lose reviews/tokens/checkpoints; Pi refuses late
+baseline recreation. Owners never auto-evict.
 
 ## Ownership and transport
 

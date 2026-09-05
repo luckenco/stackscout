@@ -1,17 +1,12 @@
 # stackscout
 
-An experimental static call-graph index and semantic diff tool for coding agents,
-inspired by [Dillon Mulroy's call-stack workflow](https://x.com/dillon_mulroy/status/2069852516309762411?s=20)
-and [fff's resident repository index](https://github.com/dmtrKovalenko/fff).
-
-StackScout traces changed functions back to affected callers, preserving call order,
-branch context, and uncertainty. The goal is to guide agents to relevant source ranges
-without repeatedly reading the whole repository—not to replace source reads or tests.
+Experimental Rust/TypeScript static call graphs and semantic diffs for coding agents.
+Trace changed functions to affected callers with call order, branch context, source ranges,
+and explicit uncertainty. Graphs guide source reads and tests; missing edges prove nothing.
+Inspired by [call-stack workflows](https://x.com/dillon_mulroy/status/2069852516309762411?s=20)
+and [fff's resident index](https://github.com/dmtrKovalenko/fff).
 
 ## Directory diff
-
-Rust and TypeScript (`.rs`, `.ts`, `.tsx`, `.mts`, `.cts`) are parsed with Tree-sitter;
-declaration-only TypeScript files are skipped.
 
 ```sh
 cargo build
@@ -28,65 +23,44 @@ Adding `audit()` inside `save()` can produce:
 ```
 
 `~` marks local syntax, export, or resolved-call changes. `+`/`-` mark paths added/removed
-in that context, not necessarily new/deleted implementations. Unchanged callee bodies
-with no reachable changes in either graph become `[unchanged body omitted]`. Changed
-and ambiguous descendants remain expanded; subtrees containing `[truncated]` stay visible.
-Control characters in labels are escaped onto one line without changing literal identity
-or source ranges. Compact rendering reduces output, not graph-building work.
-
-Files with analysis failures are omitted from both sides. Issue transitions report incomplete
-analysis; unchanged failures are hidden unless `diff-dir --diagnostics` is requested.
+in that context, not necessarily new/deleted implementations. Unchanged callee bodies with
+no reachable changes become `[unchanged body omitted]`; changed/ambiguous descendants and
+truncation stay visible. Labels escape control characters without changing literal identity.
+Failed-analysis files are omitted from both sides; `--diagnostics` includes unchanged failures.
 
 ## Pi
 
-Run `cargo build`, then start a **new Pi session** in this repository. The repo-local extension
-uses `target/debug/stackscout` (`STACKSCOUT_BIN` overrides the executable) to connect/start a
-shared service. Queries do not run Cargo or reparse unchanged files. When upgrading the binary,
-stop any old owner before starting a new session: running owners do not reload executable code.
+Build first, then start a **new Pi session** in this repository. The repo-local extension uses
+`target/debug/stackscout` (override with `STACKSCOUT_BIN`) to connect/start a shared owner.
+Stop old owners before upgrading: running processes do not reload the binary.
 
-- `call_graph({action: "callers" | "callees" | "impact", symbol, depth?, limit?, refresh?})`
-  finds bounded call paths and source ranges. Use unique names or `language:file::qualified::name`.
-- `call_graph_diff({refresh?, diagnostics?})` compares against the immutable session-start checkpoint.
-  Changes are aggregate workspace changes, not one agent's authorship. Drill down with `call_graph`.
-- `call_graph_review({files?: string[], symbols?: string[], refresh?})` reviews changes relevant
-  to an explicit scope since its last acknowledgement (initially session start). Supply 1–16
-  repository-relative files and/or symbol selectors. Before/after witness paths retain removed
-  edges, dependencies, callers, source ranges, and uncertainty; unrelated changes are omitted.
-- `call_graph_ack({review, token})` explicitly acknowledges the review name/token returned above.
-  It advances **only that scope to that result's generation**, never later unseen writes or the
-  session baseline. Inspect warnings and any omitted evidence before acknowledging; this is not
-  a completeness or correctness certificate. A newer review supersedes older unacknowledged tokens.
+- `call_graph({action: "callers" | "callees" | "impact", symbol, depth?, limit?, refresh?})`:
+  bounded paths and locations. Select by unique name or `language:file::qualified::name`.
+- `call_graph_diff({refresh?, diagnostics?})`: aggregate workspace changes since the immutable
+  session-start checkpoint, not authorship. Drill down rather than rereading a truncated diff.
+- `call_graph_review({files?: string[], symbols?: string[], refresh?})`: before/after evidence
+  relevant to 1–16 explicit file/symbol selectors since that scope's last acknowledgement.
+- `call_graph_ack({review, token})`: acknowledge the inspected review name/token, advancing only
+  that scope to that result's generation. Later writes and the session baseline remain visible.
 
-For example, review `{files: ["src/query.rs"], refresh: true}`, inspect its paths, then acknowledge
-its returned review name/token. Another scope has independent review history. Reload/resume retains
-reviews in the same owner. `forget_review` releases a review explicitly; its next use reports a reset
-back to the original session checkpoint, never a late worktree capture. See [scoped review](docs/service.md#scoped-review).
+Use `refresh: true` after Bash/external writes when freshness matters. Successful `edit`/`write`
+results await sync; failed sync warns and subsequent queries retry reconciliation. Watching is
+only eventually consistent. Startup rescans reuse unchanged analysis.
 
-Startup reconciles saved files before capture; rescans read source bytes but reuse unchanged analysis.
-Successful `edit`/`write` results await path sync. Failed sync adds a warning without misreporting the
-file write as failed; the next graph query retries a full reconciliation. Syncs and rescans share
-one queue so older completions cannot clear newer failures; graph traversal stays concurrent.
-Bash/external writes remain
-eventually consistent: use `refresh: true` when freshness matters, even with a healthy watcher.
+Capture intent, identity, and failures persist across reload/resume. Lost checkpoints/restarted
+owners make baselines unavailable, never silently recaptured; current-graph queries still work.
+Cancellation stops client requests, not owners or saved-write acknowledgement. Checkpoints remain
+for resume until explicit release/restart, with a 64-slot cap (two per rolling review).
+Read [service contracts](docs/service.md) when integrating clients or releasing checkpoints.
 
-Checkpoint identity and capture failures survive reload/resume in session metadata. Transient
-reload/resume scan or transport failures retain the original identity for retry. Restarted owners,
-forgotten checkpoints, and failed/interrupted capture make the baseline unavailable, never silently
-recaptured. Current-graph queries remain usable. Upgrading from the directory adapter requires a new
-session. Cancellation stops only client requests, not the owner or saved-write acknowledgement;
-disconnected service mutations may still finish. Shutdown retains checkpoints for resume, up to the
-service's 64-slot retention limit (each review reserves two slots); use `request` with `forget` and the checkpoint name from tool details
-to release one explicitly. No automatic eviction or owner shutdown.
-
-Results include generations, locations, analysis issues, watcher health, uncertainty, and truncation.
-Output is capped at 2,000 lines / 50 KiB. Pi display overflow is saved to a temporary file, but that
-file cannot recover service-side omissions. Hidden-directory discovery still excludes the extension
-itself. Static results supplement source reads and tests; they do not prove behavioral independence.
+Output is capped at 2,000 lines / 50 KiB. Pi overflow files cannot recover service-side omissions.
+Inspect uncertainty/truncation and source before acknowledging; acknowledgement is not a
+correctness certificate. Separate services/workspaces are safer for overlapping writers.
 
 ## Repository service
 
-Linux/macOS clients can share a watched index, immutable generations, named checkpoints,
-and bounded `callers`, `callees`, and `impact` queries with source locations.
+Linux/macOS clients share a watched index, immutable generations, and named checkpoints.
+`request` connects or starts an owner; `serve <root>` runs one in the foreground.
 
 ```sh
 target/debug/stackscout request . '{"version":1,"op":"sync","paths":[]}'
@@ -96,10 +70,8 @@ target/debug/stackscout request . '{"version":1,"op":"sync","paths":["src/lib.rs
 target/debug/stackscout request . '{"version":1,"op":"diff","name":"session"}'
 ```
 
-`request` connects or starts an owner; `serve <root>` runs one in the foreground.
-Before integrating a client, read the [protocol and consistency contract](docs/service.md):
-JSON `error` matters even on CLI success, watching is eventually consistent, and restarts
-lose checkpoints. `sync([])` is not a watcher flush.
+Read the [protocol](docs/service.md) before integration: JSON `error` matters even on CLI
+success, `sync([])` is not a watcher flush, and restarts lose checkpoints.
 
 ## Rust API
 
@@ -112,21 +84,18 @@ println!("{}", repo.diff("session")?);
 ```
 
 `change` takes relative paths/bytes; `delete` removes files. Neither reads the filesystem.
-Content/parser hashes skip unchanged analysis, including syntax failures. Updates rebuild
-global resolution/edges; public API checkpoints clone snapshots. The service batches graph
-rebuilds and shares pinned generations. There is no persistent cache or public bulk-ingestion API.
+Hashes cache unchanged analysis/failures. Updates rebuild global edges; API checkpoints clone
+snapshots, while the service batches rebuilds and shares generations. No persistent cache.
 
 ## Resolution limits
 
-Rust resolves explicit scoped `use` bindings, groups, aliases, and `crate`/`self`/`super`
-paths for free/associated calls. Shadowing and ambiguity remain explicit. This assumes
-Rust 2018+ conventional file layouts, not a Cargo module graph: globs, re-export chains,
-`#[path]`, and inferred receiver types remain unsupported.
-
-The graph is syntactic, not compiler-complete. Callback/closure bodies, macros, dynamic
-dispatch, reflection, generated code, type-driven methods, and external calls may be omitted
-or unresolved. Missing edges do not prove absence of impact. VCS revision lookup, non-Unix
-transport, additional languages, and automatic agent coordination are not implemented.
+Tree-sitter parses `.rs`, `.ts`, `.tsx`, `.mts`, `.cts`; declaration-only TypeScript is skipped.
+Rust explicit imports/groups/aliases and `crate`/`self`/`super` assume conventional Rust 2018+
+file layouts, not Cargo's module graph. Globs, re-export chains, `#[path]`, type-driven receivers,
+callbacks/closures, macros, dynamic dispatch, reflection, and generated/external code may be
+unresolved or omitted. Hidden directories (including the extension itself) are excluded.
+Test and production configurations mix. VCS history, more languages, non-Unix transport,
+and automatic writer coordination are outside the MVP.
 
 ## Checks
 
@@ -137,14 +106,10 @@ cargo clippy --all-targets -- -D warnings
 bun test tests/pi_extension.test.ts tests/pi_live.test.ts
 ```
 
-Unit lifecycle tests use a stub Pi API. Live tests launch isolated Node/Pi SDK processes with
-scripted model responses but real extension loading, agent loops, tools, persistence, service
-execution, and truncation. They require Node and Pi on PATH (or `STACKSCOUT_PI_PACKAGE` pointing
-to its installed package directory); missing Pi skips live tests explicitly. No npm install is
-needed for a development Pi install; standalone bundled installs also need the matching
-`@earendil-works/pi-ai` package beside Pi for scripted responses. Live fixtures disable watching
-to prove explicit sync rather than incidental watcher freshness. Integration checks passed on
-macOS and Linux arm64 (Docker with an init process).
-For resolver measurements and the manual benchmark, see [performance](docs/performance.md).
+Live tests use real Node/Pi SDK processes with scripted model responses and watching disabled.
+They require Node and Pi on PATH (or `STACKSCOUT_PI_PACKAGE`); missing Pi explicitly skips them.
+Bundled Pi installs also need matching `@earendil-works/pi-ai` beside Pi. Service changes require
+Linux and macOS checks; use an init process in Docker. Unit lifecycle tests stub the Pi API.
+For manual measurements, see [performance](docs/performance.md).
 
 [MIT License](LICENSE)
