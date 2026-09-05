@@ -3,6 +3,8 @@ mod diff;
 mod discover;
 mod graph;
 mod model;
+#[cfg(unix)]
+mod query;
 mod render;
 mod repository;
 mod resolve;

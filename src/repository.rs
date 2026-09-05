@@ -14,7 +14,7 @@ struct Key {
 }
 
 #[derive(Clone)]
-struct File {
+pub(crate) struct File {
     key: Key,
     analysis: Result<model::FileArtifact, analyze::Issue>,
 }
@@ -64,36 +64,16 @@ impl Repository {
     }
 
     fn file(&mut self, path: &str, bytes: &[u8]) -> Result<Option<File>, Error> {
-        let key = Key {
-            version: analyze::VERSION,
-            syntax: source_path(path)?,
-            hash: blake3::hash(bytes),
-        };
-        if self
-            .current
-            .files
-            .get(path)
-            .is_some_and(|file| file.key == key)
-        {
-            return Ok(None);
-        }
-        let source = std::str::from_utf8(bytes).map_err(|error| Error {
-            message: format!("invalid UTF-8 source in {path}: {error}"),
-        })?;
-        let analysis = self
-            .analyzers
-            .file(path, source)
-            .map_err(|error| analyze::Issue::new(path.to_owned(), error));
-        Ok(Some(File { key, analysis }))
+        self.current.prepare(path, bytes, &mut self.analyzers)
     }
 
     // Stage a deduplicated batch, then resolve once and commit all or nothing.
-    #[cfg(any(unix, test))]
+    #[cfg(test)]
     pub(crate) fn update(
         &mut self,
         changes: &BTreeMap<String, Option<Vec<u8>>>,
     ) -> Result<bool, Error> {
-        let mut updates = Vec::new();
+        let mut updates = BTreeMap::new();
         for (path, bytes) in changes {
             let file = if let Some(bytes) = bytes {
                 let Some(file) = self.file(path, bytes)? else {
@@ -107,17 +87,23 @@ impl Repository {
                 }
                 None
             };
-            updates.push((path, file));
+            updates.insert(path.clone(), file);
         }
+        self.apply(updates)
+    }
+
+    // Prepared artifacts are plain data; I/O and parallel scheduling belong to the caller.
+    #[cfg(any(unix, test))]
+    pub(crate) fn apply(&mut self, updates: BTreeMap<String, Option<File>>) -> Result<bool, Error> {
         if updates.is_empty() {
             return Ok(false);
         }
         let mut files = self.current.files.clone();
         for (path, file) in updates {
             if let Some(file) = file {
-                files.insert(path.clone(), file);
+                files.insert(path, file);
             } else {
-                files.remove(path);
+                files.remove(&path);
             }
         }
         let graph = crate::build(
@@ -185,10 +171,33 @@ pub(crate) fn source_path(path: &str) -> Result<model::Syntax, Error> {
 #[derive(Clone, Default)]
 pub(crate) struct Snapshot {
     files: BTreeMap<String, File>,
-    graph: graph::Graph,
+    pub(crate) graph: graph::Graph,
 }
 
 impl Snapshot {
+    pub(crate) fn prepare(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        analyzers: &mut analyze::Analyzers,
+    ) -> Result<Option<File>, Error> {
+        let key = Key {
+            version: analyze::VERSION,
+            syntax: source_path(path)?,
+            hash: blake3::hash(bytes),
+        };
+        if self.files.get(path).is_some_and(|file| file.key == key) {
+            return Ok(None);
+        }
+        let source = std::str::from_utf8(bytes).map_err(|error| Error {
+            message: format!("invalid UTF-8 source in {path}: {error}"),
+        })?;
+        let analysis = analyzers
+            .file(path, source)
+            .map_err(|error| analyze::Issue::new(path.to_owned(), error));
+        Ok(Some(File { key, analysis }))
+    }
+
     #[cfg(any(unix, test))]
     pub(crate) fn paths(&self) -> impl Iterator<Item = &String> {
         self.files.keys()

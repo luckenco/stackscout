@@ -16,6 +16,7 @@ struct Workspace {
     root: PathBuf,
     child: Option<Child>,
     detached_pid: Option<u32>,
+    watching: bool,
 }
 
 impl Workspace {
@@ -26,6 +27,7 @@ impl Workspace {
             _directory: directory,
             child: None,
             detached_pid: None,
+            watching: false,
         }
     }
 
@@ -34,6 +36,7 @@ impl Workspace {
             Command::new(env!("CARGO_BIN_EXE_stackscout"))
                 .arg("serve")
                 .arg(&self.root)
+                .env("STACKSCOUT_WATCH", if self.watching { "1" } else { "0" })
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .spawn()
@@ -68,6 +71,222 @@ impl Drop for Workspace {
 
 fn request(root: &Path, json: &str) -> Value {
     serde_json::from_str(&stackscout::service::request(root, json).unwrap()).unwrap()
+}
+
+fn wait(root: &Path, predicate: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = request(root, r#"{"version":1,"op":"status"}"#);
+        if predicate(&status) {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not converge: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn watcher_reconciles_atomic_saves_directories_ignores_and_unchanged_hashes() {
+    let mut workspace = Workspace::new();
+    workspace.watching = true;
+    let root = workspace.root.clone();
+    fs::write(root.join("lib.rs"), "pub fn run() {}").unwrap();
+    workspace.start();
+    wait(&root, |status| {
+        status["watching"] == true && status["index_complete"] == true
+    });
+    request(&root, r#"{"version":1,"op":"checkpoint","name":"before"}"#);
+    fs::write(root.join(".save"), "pub fn run() { changed(); }").unwrap();
+    fs::rename(root.join(".save"), root.join("lib.rs")).unwrap();
+    wait(&root, |status| {
+        status["generation"].as_u64().unwrap_or(0) >= 2
+    });
+    assert!(
+        request(&root, r#"{"version":1,"op":"diff","name":"before"}"#)["diff"]
+            .as_str()
+            .unwrap()
+            .contains("changed")
+    );
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("nested/worker.ts"), "export function work() {}").unwrap();
+    wait(&root, |status| status["files"] == 2);
+    fs::rename(root.join("nested"), root.join("renamed.rs")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let query = request(
+            &root,
+            r#"{"version":1,"op":"callees","symbol":"ts:renamed.rs/worker.ts::work"}"#,
+        );
+        if query["error"].is_null() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "directory rename did not converge: {query}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    fs::remove_dir_all(root.join("renamed.rs")).unwrap();
+    wait(&root, |status| status["files"] == 1);
+    fs::write(root.join(".ignore"), "lib.rs\n").unwrap();
+    wait(&root, |status| status["files"] == 0);
+    fs::write(root.join(".ignore"), "").unwrap();
+    wait(&root, |status| {
+        status["files"] == 1 && status["recovery_needed"] == false
+    });
+    let before = request(&root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    fs::write(root.join("lib.rs"), "pub fn run() { changed(); }").unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    let after = request(&root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    assert_eq!(after["generation"], before["generation"]);
+    assert!(after["watcher_error"].is_null(), "{after}");
+}
+
+#[test]
+fn graph_queries_report_locations_ambiguity_limits_and_generations() {
+    let mut workspace = Workspace::new();
+    fs::write(
+        workspace.root.join("lib.rs"),
+        "pub fn run() { work(); missing(); } fn work() {}",
+    )
+    .unwrap();
+    fs::write(workspace.root.join("other.rs"), "fn work() {}").unwrap();
+    workspace.start();
+    request(&workspace.root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    let ambiguous = request(
+        &workspace.root,
+        r#"{"version":1,"op":"callees","symbol":"work"}"#,
+    );
+    assert!(ambiguous["error"].as_str().unwrap().contains("ambiguous"));
+    let callers = request(
+        &workspace.root,
+        r#"{"version":1,"op":"callers","symbol":"rust:lib.rs::work"}"#,
+    );
+    assert!(callers["error"].is_null(), "{callers}");
+    assert_eq!(callers["generation"], 1);
+    assert_eq!(callers["graph"]["symbols"].as_array().unwrap().len(), 2);
+    assert_eq!(callers["graph"]["calls"][0]["location"]["start_line"], 1);
+    let callees = request(
+        &workspace.root,
+        r#"{"version":1,"op":"callees","symbol":"run"}"#,
+    );
+    assert!(
+        callees["graph"]["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|call| call["resolution"] == "unresolved")
+    );
+    let limited = request(
+        &workspace.root,
+        r#"{"version":1,"op":"impact","symbol":"rust:lib.rs::work","limit":1}"#,
+    );
+    assert_eq!(limited["truncated"], true);
+    for json in [
+        r#"{"version":1,"op":"callees","symbol":"run","limit":0}"#,
+        r#"{"version":1,"op":"callees","symbol":"run","depth":33}"#,
+        r#"{"version":1,"op":"callees","symbol":"run","extra":true}"#,
+    ] {
+        assert!(request(&workspace.root, json)["error"].is_string());
+    }
+}
+
+#[test]
+fn long_paths_share_ownership_and_recover_stale_fallback_sockets() {
+    let mut workspace = Workspace::new();
+    workspace.root = workspace.root.join("long-workspace-name-".repeat(8));
+    fs::create_dir(&workspace.root).unwrap();
+    fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();
+    workspace.start();
+    let first = request(&workspace.root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    assert_eq!(first["files"], 1);
+    assert!(!workspace.root.join(".stackscout/service.sock").exists());
+    let alias = workspace._directory.path().join("alias");
+    std::os::unix::fs::symlink(&workspace.root, &alias).unwrap();
+    assert_eq!(
+        request(&alias, r#"{"version":1,"op":"status"}"#)["instance"],
+        first["instance"]
+    );
+    let loser = Command::new(env!("CARGO_BIN_EXE_stackscout"))
+        .arg("serve")
+        .arg(&alias)
+        .output()
+        .unwrap();
+    assert!(!loser.status.success());
+    workspace.child.as_mut().unwrap().kill().unwrap();
+    workspace.child.as_mut().unwrap().wait().unwrap();
+    workspace.start();
+    let restarted = request(&alias, r#"{"version":1,"op":"sync","paths":[]}"#);
+    assert_ne!(restarted["instance"], first["instance"]);
+    assert_eq!(restarted["files"], 1);
+}
+
+#[test]
+fn slow_frames_and_waiting_updates_do_not_occupy_read_workers() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let mut workspace = Workspace::new();
+    workspace.start();
+    request(&workspace.root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    let socket = workspace.root.join(".stackscout/service.sock");
+    let mut clients = Vec::new();
+    for _ in 0..16 {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.write_all(b"{\"version\":").unwrap();
+        clients.push(stream);
+    }
+    for index in 0..300 {
+        fs::write(
+            workspace.root.join(format!("f{index}.rs")),
+            "pub fn added() {}",
+        )
+        .unwrap();
+    }
+    for _ in 0..8 {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .write_all(b"{\"version\":1,\"op\":\"rescan\"}\n")
+            .unwrap();
+        clients.push(stream);
+    }
+    let start = Instant::now();
+    let status = request(&workspace.root, r#"{"version":1,"op":"status"}"#);
+    assert!(status["error"].is_null(), "{status}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "read waited for slow-frame deadline"
+    );
+}
+
+#[test]
+fn oversized_sources_preserve_the_previous_generation() {
+    let mut workspace = Workspace::new();
+    fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();
+    workspace.start();
+    request(&workspace.root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    fs::write(workspace.root.join("lib.rs"), "pub fn changed() {}").unwrap();
+    fs::File::create(workspace.root.join("huge.rs"))
+        .unwrap()
+        .set_len(8 * 1024 * 1024 + 1)
+        .unwrap();
+    let response = request(&workspace.root, r#"{"version":1,"op":"rescan"}"#);
+    assert_eq!(response["generation"], 1);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds 8 MiB")
+    );
+    assert!(
+        request(
+            &workspace.root,
+            r#"{"version":1,"op":"callees","symbol":"run"}"#
+        )["error"]
+            .is_null()
+    );
 }
 
 #[test]
@@ -145,6 +364,7 @@ fn startup_racers_share_one_owner_and_crash_recovery_does_not_restore_checkpoint
         clients.push(
             Command::new(env!("CARGO_BIN_EXE_stackscout"))
                 .arg("request")
+                .env("STACKSCOUT_WATCH", "0")
                 .arg(root)
                 .arg(r#"{"version":1,"op":"sync","paths":[]}"#)
                 .stdout(Stdio::piped())

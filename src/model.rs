@@ -58,7 +58,7 @@ impl fmt::Display for SymbolKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct SourceRange {
     pub(crate) start_line: usize,
     pub(crate) start_column: usize,
