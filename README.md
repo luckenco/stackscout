@@ -121,11 +121,15 @@ transport, additional languages, and automatic agent coordination are not implem
 cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
-bun test tests/pi_extension.test.ts
+bun test tests/pi_extension.test.ts tests/pi_live.test.ts
 ```
 
-Bun lifecycle tests use temporary files and a stub Pi API; no npm install is needed.
-They do not exercise Pi's loader, Cargo execution, or real truncation.
+Unit lifecycle tests use a stub Pi API. Live tests launch isolated Node/Pi SDK processes with
+scripted model responses but real extension loading, agent loops, tools, persistence, service
+execution, and truncation. They require Node and Pi on PATH (or `STACKSCOUT_PI_PACKAGE` pointing
+to its installed package directory); missing Pi skips live tests explicitly. No npm install is
+needed. Live fixtures disable watching to prove explicit sync rather than incidental watcher
+freshness. Milestone 4 integration was verified on macOS; Linux integration verification is deferred.
 For resolver measurements and the manual benchmark, see [performance](docs/performance.md).
 
 [MIT License](LICENSE)
