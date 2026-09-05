@@ -1,103 +1,222 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
+import { mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	truncateHead,
-} from "@earendil-works/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-const READY = ".ready-v2";
-const FAILURE = "stackscout-baseline-failure";
+const STATE = "stackscout-session-v1";
+const WARNING = "Syntactic analysis only: unresolved/dynamic calls may be missing; no path does not prove no impact.";
+const REFRESH = Type.Optional(Type.Boolean({ description: "Rescan saved files first (for Bash/external edits or ignore changes). Does not advance the baseline." }));
 
+type Generation = { instance: string; generation: number };
 type Baseline =
-	| { status: "ready"; path: string }
+	| (Generation & { status: "ready"; root: string; name: string })
 	| { status: "unavailable"; reason: string };
+type Range = { start_line: number; start_column: number; end_line: number; end_column: number };
+type Graph = {
+	symbols: { id: string; file: string; location: Range; depth: number }[];
+	calls: { caller: string; callee: string | null; target: string; resolution: string; location: Range }[];
+};
+type Response = {
+	version: number; root: string; instance: string; generation: number | null;
+	index_complete: boolean; watching: boolean; recovery_needed: boolean;
+	watcher_error: string | null; last_update_error: string | null;
+	analysis_issue_count: number; analysis_issues: string[]; progress: unknown;
+	checkpoint_generation: number | null; diff: string | null; graph: Graph | null;
+	truncated: boolean; error: string | null;
+};
 
 export default function (pi: ExtensionAPI) {
 	let baseline: Baseline = { status: "unavailable", reason: "Session initialization has not completed" };
+	let acknowledged: Generation | undefined;
+	let root: string | undefined;
+	let writes = Promise.resolve();
+	let syncError: string | undefined;
+	const lifetime = new AbortController();
 
-	pi.on("session_start", async (_event, ctx) => {
+	function save(ctx: ExtensionContext, value: Baseline) {
+		pi.appendEntry(STATE, { sessionId: ctx.sessionManager.getSessionId(), ...value });
+		baseline = value;
+	}
+
+	function fail(ctx: ExtensionContext, reason: string) {
+		baseline = { status: "unavailable", reason };
+		try {
+			save(ctx, baseline);
+		} catch (error) {
+			report(ctx, `Could not persist StackScout baseline failure: ${message(error)}`);
+		}
+		report(ctx, unavailable(reason));
+	}
+
+	async function send(ctx: ExtensionContext, operation: object, signal?: AbortSignal) {
+		const signals = [lifetime.signal];
+		if (signal) signals.push(signal);
+		const combined = AbortSignal.any(signals);
+		combined.throwIfAborted();
+		root ??= await realpath(ctx.cwd);
+		const response = await request(pi, root, operation, combined);
+		if (baseline.status === "ready" && response.instance !== baseline.instance) {
+			fail(ctx, "Repository service restarted; the original checkpoint was lost");
+		}
+		if (response.error !== null) throw new Error(response.error);
+		return response;
+	}
+
+	function requireBaseline() {
+		if (baseline.status !== "ready") throw new Error(unavailable(baseline.reason));
+		return baseline;
+	}
+
+	function acknowledge(response: Response) {
+		const next = generation(response);
+		if (acknowledged?.instance === next.instance) checkGeneration(response, acknowledged);
+		acknowledged = next;
+	}
+
+	// Await explicit writes, not watcher delivery. A new owner needs a full reconciliation.
+	async function prepare(ctx: ExtensionContext, signal?: AbortSignal, refresh = false) {
+		await wait(writes, signal);
+		let operation: object = { op: "sync", paths: [] };
+		if (refresh || syncError || !acknowledged) operation = { op: "rescan" };
+		let response = await send(ctx, operation, signal);
+		if (acknowledged && acknowledged.instance !== response.instance) {
+			response = await send(ctx, { op: "rescan" }, signal);
+		}
+		acknowledge(response);
+		syncError = undefined;
+		return generation(response);
+	}
+
+	pi.on("session_start", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		// Failures belong to the session, including across reload/resume, but not forks.
-		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== FAILURE) continue;
-			const data = entry.data as { sessionId?: string; reason?: string } | undefined;
-			if (data?.sessionId === sessionId && typeof data.reason === "string") {
-				baseline = { status: "unavailable", reason: data.reason };
-				report(ctx, unavailable(baseline.reason));
+		const entries = ctx.sessionManager.getEntries();
+		try {
+			const saved = entries.findLast((entry) => entry.type === "custom"
+				&& entry.customType === STATE && (entry.data as { sessionId?: string })?.sessionId === sessionId);
+			if (saved?.type === "custom") {
+				const value = saved.data as Baseline;
+				if (value.status === "unavailable" && typeof value.reason === "string") {
+					baseline = value;
+					report(ctx, unavailable(value.reason));
+					return;
+				}
+				if (value.status !== "ready" || typeof value.root !== "string" || typeof value.name !== "string"
+					|| typeof value.instance !== "string" || !Number.isSafeInteger(value.generation)) {
+					throw new Error("Invalid saved checkpoint metadata");
+				}
+				baseline = value;
+				root = await realpath(ctx.cwd);
+				if (root !== value.root) throw new Error("Session repository root changed");
+				const expected = await prepare(ctx, undefined, true);
+				if (baseline.status !== "ready") return;
+				// Never use checkpoint here: it would create a late baseline if the name was forgotten.
+				const response = await send(ctx, { op: "diff", name: value.name });
+				checkGeneration(response, expected);
+				if (response.checkpoint_generation !== value.generation) throw new Error("Checkpoint generation changed");
 				return;
 			}
-		}
-		try {
-			baseline = { status: "ready", path: await ensureBaseline(pi, ctx) };
-		} catch (error) {
-			baseline = { status: "unavailable", reason: message(error) };
-			report(ctx, unavailable(baseline.reason));
-			try {
-				pi.appendEntry(FAILURE, { sessionId, reason: baseline.reason });
-			} catch (saveError) {
-				report(ctx, `Could not persist StackScout baseline failure: ${message(saveError)}`);
+			if (event.reason === "reload" || event.reason === "resume"
+				|| (event.reason !== "fork" && entries.some((entry) => entry.type === "message"))) {
+				throw new Error("This session has no service checkpoint; upgrading requires a new session");
 			}
+			// Persist intent before I/O so interrupted/failed capture cannot be retried after edits.
+			save(ctx, { status: "unavailable", reason: "Initial checkpoint capture did not complete" });
+			const expected = await prepare(ctx, undefined, true);
+			const name = `pi-${createHash("sha256").update(sessionId).digest("hex")}`;
+			const response = await send(ctx, { op: "checkpoint", name });
+			checkGeneration(response, expected);
+			if (!Number.isSafeInteger(response.checkpoint_generation)
+				|| response.checkpoint_generation! < expected.generation
+				|| response.checkpoint_generation! > response.generation!) {
+				throw new Error("Checkpoint does not cover the initial reconciliation");
+			}
+			save(ctx, { status: "ready", root: response.root, name, instance: response.instance, generation: response.checkpoint_generation! });
+		} catch (error) {
+			fail(ctx, message(error));
 		}
+	});
+
+	pi.on("session_shutdown", () => {
+		// Requests belong to this client; checkpoints and the owner deliberately outlive it.
+		lifetime.abort(new Error("StackScout session closed"));
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.isError || (event.toolName !== "edit" && event.toolName !== "write")) return;
+		// A saved write must be acknowledged even if its originating turn was cancelled.
+		const update = writes.then(async () => {
+			try {
+				root ??= await realpath(ctx.cwd);
+				const paths = await syncPaths(root, ctx.cwd, event.input.path);
+				if (paths?.length === 0) return;
+				let operation: object = { op: "sync", paths };
+				if (paths === undefined || syncError || !acknowledged) operation = { op: "rescan" };
+				let response = await send(ctx, operation);
+				if (acknowledged && acknowledged.instance !== response.instance) response = await send(ctx, { op: "rescan" });
+				acknowledge(response);
+				syncError = undefined;
+			} catch (error) {
+				syncError = message(error);
+			}
+		});
+		writes = update;
+		await update;
+		if (syncError) {
+			return { content: [...event.content, { type: "text" as const, text: `StackScout sync failed (file write succeeded): ${syncError}. Graph queries will retry reconciliation.` }] };
+		}
+	});
+
+	pi.registerTool({
+		name: "call_graph",
+		label: "Call graph",
+		description: "Query saved Rust/TypeScript callers, callees, or impact in the shared repository index. Accepts unique names or language:file::qualified::name IDs. Bounded to 2000 lines / 50 KiB; static results are advisory.",
+		promptSnippet: "Find callers, callees, or impact with source locations in the shared index",
+		promptGuidelines: ["Use call_graph to drill into symbols from call_graph_diff; use refresh after Bash/external edits when freshness matters."],
+		parameters: Type.Object({
+			action: StringEnum(["callers", "callees", "impact"] as const),
+			symbol: Type.String(),
+			depth: Type.Optional(Type.Integer({ minimum: 0, maximum: 32 })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 256 })),
+			refresh: REFRESH,
+		}),
+		async execute(_id, { action, symbol, depth, limit, refresh }, signal, _onUpdate, ctx) {
+			const expected = await prepare(ctx, signal, refresh);
+			const response = await send(ctx, { op: action, symbol, depth, limit }, signal);
+			checkGeneration(response, expected);
+			if (!response.graph) throw new Error("Service returned no graph");
+			return output(response, baseline, graphText(response.graph), signal);
+		},
 	});
 
 	pi.registerTool({
 		name: "call_graph_diff",
 		label: "Call graph diff",
-		description: `Compare the repository's current Rust and TypeScript call graph with its Pi session-start baseline. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-		promptSnippet: "Compare current call paths with the Pi session-start baseline",
-		promptGuidelines: [
-			"Use call_graph_diff after edits that may change Rust or TypeScript functions or calls; treat missing, noisy, or incorrect results as StackScout dogfooding findings.",
-		],
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+		description: "Compare saved Rust/TypeScript call paths against the immutable Pi session-start checkpoint. Includes aggregate workspace changes, not authorship. Bounded to 2000 lines / 50 KiB; service truncation is explicit.",
+		promptSnippet: "Compare current call paths with the Pi session-start checkpoint",
+		promptGuidelines: ["Use call_graph_diff after call-affecting Rust/TypeScript edits; inspect unintended impact and report missing, noisy, or incorrect results. Use refresh after Bash/external edits when freshness matters."],
+		parameters: Type.Object({ refresh: REFRESH, diagnostics: Type.Optional(Type.Boolean()) }),
+		async execute(_id, { refresh, diagnostics }, signal, _onUpdate, ctx) {
 			signal?.throwIfAborted();
-			if (baseline.status === "unavailable") {
-				throw new Error(unavailable(baseline.reason));
+			const saved = requireBaseline();
+			const expected = await prepare(ctx, signal, refresh);
+			requireBaseline();
+			let response: Response;
+			try {
+				response = await send(ctx, { op: "diff", name: saved.name, diagnostics }, signal);
+				checkGeneration(response, expected);
+				if (response.checkpoint_generation !== saved.generation) throw new Error("Checkpoint generation changed");
+			} catch (error) {
+				if (/unknown checkpoint|Checkpoint generation changed/.test(message(error))) fail(ctx, message(error));
+				throw error;
 			}
-			const snapshot = baseline.path;
-			const result = await pi.exec(
-				"cargo",
-				[
-					"run",
-					"--quiet",
-					"--manifest-path",
-					join(ctx.cwd, "Cargo.toml"),
-					"--",
-					"diff-dir",
-					snapshot,
-					ctx.cwd,
-				],
-				{ cwd: ctx.cwd, signal },
-			);
-			signal?.throwIfAborted();
-			if (result.code !== 0) {
-				throw new Error(result.stderr.trim() || result.stdout.trim() || "StackScout failed");
-			}
-
-			const output = result.stdout || "No semantic call-graph changes since session start.\n";
-			const truncated = truncateHead(output, {
-				maxBytes: DEFAULT_MAX_BYTES,
-				maxLines: DEFAULT_MAX_LINES,
-			});
-			let text = truncated.content;
-			let fullOutputPath: string | undefined;
-			if (truncated.truncated) {
-				const directory = await mkdtemp(join(tmpdir(), "stackscout-pi-"));
-				fullOutputPath = join(directory, "diff.txt");
-				await writeFile(fullOutputPath, output, "utf8");
-				text += `\n\n[Output truncated. Full output: ${fullOutputPath}]`;
-			}
-
-			return {
-				content: [{ type: "text", text }],
-				details: { baseline: snapshot, fullOutputPath },
-			};
+			if (typeof response.diff !== "string") throw new Error("Service returned no diff");
+			const text = response.diff || "No semantic call-graph changes in the analyzed files since session start.\n";
+			return output(response, baseline, "Locations: '-' uses checkpoint; other lines use queried generation. Ranges are definitions at roots, call sites below.\n" + text, signal);
 		},
 	});
 }
@@ -112,70 +231,112 @@ function unavailable(reason: string): string {
 }
 
 function report(ctx: ExtensionContext, text: string) {
-	if (ctx.hasUI) {
-		ctx.ui.notify(text, "error");
-	} else {
-		console.error(text);
+	if (ctx.hasUI) ctx.ui.notify(text, "error");
+	else console.error(text);
+}
+
+function generation(response: Response): Generation {
+	if (!response.index_complete || response.generation === null) throw new Error("Repository index is not ready");
+	return { instance: response.instance, generation: response.generation };
+}
+
+function checkGeneration(response: Response, expected: Generation) {
+	const current = generation(response);
+	if (current.instance !== expected.instance || current.generation < expected.generation) {
+		throw new Error("Repository instance/generation changed during request; retry the query (baseline is never recaptured)");
 	}
 }
 
-async function ensureBaseline(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
-	const cwd = ctx.cwd;
-	const key = createHash("sha256").update(ctx.sessionManager.getSessionId()).digest("hex").slice(0, 16);
-	const baseline = join(cwd, ".pi", "stackscout-baselines", key);
-	try {
-		await readFile(join(baseline, READY));
-		return baseline;
-	} catch (error) {
-		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
-			throw error;
-		}
+async function request(pi: ExtensionAPI, root: string, operation: object, signal: AbortSignal): Promise<Response> {
+	signal.throwIfAborted();
+	const binary = process.env.STACKSCOUT_BIN || join(root, "target", "debug", "stackscout");
+	const result = await pi.exec(binary, ["request", root, JSON.stringify({ version: 1, ...operation })], { cwd: root, signal, timeout: 125_000 });
+	signal.throwIfAborted();
+	if (result.code !== 0 || result.killed) {
+		throw new Error(result.stderr.trim() || "StackScout request failed or timed out; run cargo build before starting Pi");
 	}
-	await rm(baseline, { recursive: true, force: true });
+	const response = JSON.parse(result.stdout) as Response;
+	if (!response || response.version !== 1 || response.root !== root || typeof response.instance !== "string"
+		|| (response.generation !== null && (!Number.isSafeInteger(response.generation) || response.generation < 1))
+		|| typeof response.index_complete !== "boolean" || typeof response.watching !== "boolean"
+		|| typeof response.recovery_needed !== "boolean" || typeof response.truncated !== "boolean"
+		|| (response.error !== null && typeof response.error !== "string")) {
+		throw new Error("Invalid StackScout protocol response or repository root");
+	}
+	return response;
+}
 
-	const files = await pi.exec(
-		"rg",
-		[
-			"--files",
-			"--null",
-			"--glob",
-			"*.rs",
-			"--glob",
-			"*.ts",
-			"--glob",
-			"*.tsx",
-			"--glob",
-			"*.mts",
-			"--glob",
-			"*.cts",
-			"--glob",
-			"!*.d.ts",
-			"--glob",
-			"!*.d.mts",
-			"--glob",
-			"!*.d.cts",
-		],
-		{ cwd },
-	);
-	if (files.code !== 0 && files.code !== 1) {
-		throw new Error(files.stderr.trim() || "Could not list source files for StackScout baseline");
-	}
-
+// Match Pi's saved-file path spellings, then let service discovery enforce ignores/symlink policy.
+async function syncPaths(root: string, cwd: string, input: unknown): Promise<string[] | undefined> {
+	if (typeof input !== "string") throw new Error("Saved-file tool did not provide a path");
+	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+	if (path === "~") path = homedir();
+	else if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
+	else if (path.startsWith("file://")) path = fileURLToPath(path);
+	path = resolve(await realpath(cwd), path);
+	const candidates = [path];
 	try {
-		await mkdir(baseline, { recursive: true });
-		for (const path of files.stdout.split("\0").filter(Boolean)) {
-			const destination = join(baseline, path);
-			await mkdir(dirname(destination), { recursive: true });
-			await copyFile(join(cwd, path), destination);
-		}
-		await writeFile(join(baseline, READY), "", "utf8");
-		return baseline;
+		candidates.push(await realpath(path));
 	} catch (error) {
-		try {
-			await rm(baseline, { recursive: true, force: true });
-		} catch (cleanupError) {
-			report(ctx, `Could not remove incomplete StackScout baseline ${baseline}: ${message(cleanupError)}`);
-		}
-		throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
+	const paths = [...new Set(candidates.map((candidate) => relative(root, candidate)))]
+		.filter((candidate) => candidate && candidate !== ".." && !candidate.startsWith("../"));
+	if (paths.some((candidate) => [".gitignore", ".ignore"].includes(basename(candidate)) || candidate === ".git/info/exclude")) return undefined;
+	return paths.filter((candidate) => /\.(rs|ts|tsx|mts|cts)$/.test(candidate) && !/\.d\.(ts|mts|cts)$/.test(candidate));
+}
+
+async function wait(promise: Promise<void>, signal?: AbortSignal) {
+	signal?.throwIfAborted();
+	if (!signal) return promise;
+	let abort!: () => void;
+	try {
+		await Promise.race([promise, new Promise<never>((_resolve, reject) => {
+			abort = () => reject(signal.reason);
+			signal.addEventListener("abort", abort, { once: true });
+		})]);
+	} finally {
+		signal.removeEventListener("abort", abort);
+	}
+}
+
+function range(location: Range): string {
+	return `${location.start_line}:${location.start_column}-${location.end_line}:${location.end_column}`;
+}
+
+function graphText(graph: Graph): string {
+	const lines = graph.symbols.map((symbol) => `depth ${symbol.depth}: ${JSON.stringify(symbol.id)} @ ${JSON.stringify(symbol.file)}:${range(symbol.location)}`);
+	for (const call of graph.calls) {
+		lines.push(`${JSON.stringify(call.caller)} @ ${range(call.location)} -> ${JSON.stringify(call.callee ?? call.target)} [${call.resolution}]`);
+	}
+	return lines.join("\n");
+}
+
+async function output(response: Response, baseline: Baseline, body: string, signal?: AbortSignal) {
+	const lines = [
+		`Repository: ${JSON.stringify(response.root)}; instance: ${JSON.stringify(response.instance)}; generation: ${response.generation}; checkpoint: ${response.checkpoint_generation ?? "none"}`,
+		`Index complete: ${response.index_complete}; analysis issues: ${response.analysis_issue_count}; watching: ${response.watching}; recovery needed: ${response.recovery_needed}; update in progress: ${response.progress !== null}`,
+		"Freshness: explicit saved-file writes are acknowledged; Bash/external writes are eventually consistent even with a healthy watcher. Use refresh:true to reconcile.",
+		WARNING,
+	];
+	if (response.watcher_error) lines.push(`Watcher error: ${JSON.stringify(response.watcher_error)}`);
+	if (response.last_update_error) lines.push(`Last update error: ${JSON.stringify(response.last_update_error)}`);
+	if (response.truncated) lines.push("[Service result truncated: omitted evidence is unavailable in this response. Drill down with call_graph and narrower limits/selectors.]");
+	for (const issue of response.analysis_issues) lines.push(`Analysis issue: ${JSON.stringify(issue)}`);
+	lines.push("", body);
+	const text = lines.join("\n");
+	const cut = truncateHead(text, { maxBytes: DEFAULT_MAX_BYTES - 1024, maxLines: DEFAULT_MAX_LINES - 4 });
+	let content = cut.content;
+	let responsePath: string | undefined;
+	if (cut.truncated) {
+		const directory = await mkdtemp(join(tmpdir(), "stackscout-pi-"));
+		responsePath = join(directory, "response.txt");
+		await writeFile(responsePath, text, "utf8");
+		content += `\n\n[Pi display truncated. Saved response: ${responsePath}. Service-side omissions are not recoverable from this file.]`;
+	}
+	signal?.throwIfAborted();
+	return {
+		content: [{ type: "text" as const, text: content }],
+		details: { ...response, baseline, display_truncated: cut.truncated, responsePath },
+	};
 }

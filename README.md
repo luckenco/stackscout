@@ -39,14 +39,33 @@ analysis; unchanged failures are hidden unless `diff-dir --diagnostics` is reque
 
 ## Pi
 
-The repo-local extension exposes `call_graph_diff` against a session-start source copy.
-Completed snapshots survive reload/resume; capture failures are retained in session metadata
-and require a new session. Tool execution never captures a late baseline. Cancellation
-stops its Cargo command, not baseline capture.
+Run `cargo build`, then start a **new Pi session** in this repository. The repo-local extension
+uses `target/debug/stackscout` (`STACKSCOUT_BIN` overrides the executable) to connect/start a
+shared service. Queries do not run Cargo or reparse unchanged files. When upgrading the binary,
+stop any old owner before starting a new session: running owners do not reload executable code.
 
-Each call reparses both directories. Output is capped at 2,000 lines / 50 KiB, with full
-truncated output saved to a temporary file. Hidden-directory discovery excludes the extension
-itself. Pi is **not yet connected to the repository service**.
+- `call_graph({action: "callers" | "callees" | "impact", symbol, depth?, limit?, refresh?})`
+  finds bounded call paths and source ranges. Use unique names or `language:file::qualified::name`.
+- `call_graph_diff({refresh?, diagnostics?})` compares against the immutable session-start checkpoint.
+  Changes are aggregate workspace changes, not one agent's authorship. Drill down with `call_graph`.
+
+Startup reconciles saved files before capture; rescans read source bytes but reuse unchanged analysis.
+Successful `edit`/`write` results await path sync. Failed sync adds a warning without misreporting the
+file write as failed; the next graph query retries a full reconciliation. Bash/external writes remain
+eventually consistent: use `refresh: true` when freshness matters, even with a healthy watcher.
+
+Checkpoint identity and capture failures survive reload/resume in session metadata. Restarted owners,
+forgotten checkpoints, and failed/interrupted capture make the baseline unavailable, never silently
+recaptured. Current-graph queries remain usable. Upgrading from the directory adapter requires a new
+session. Cancellation stops only client requests, not the owner or saved-write acknowledgement;
+disconnected service mutations may still finish. Shutdown retains checkpoints for resume, up to the
+service's 64-checkpoint limit; use `request` with `forget` and the checkpoint name from tool details
+to release one explicitly. No automatic eviction or owner shutdown.
+
+Results include generations, locations, analysis issues, watcher health, uncertainty, and truncation.
+Output is capped at 2,000 lines / 50 KiB. Pi display overflow is saved to a temporary file, but that
+file cannot recover service-side omissions. Hidden-directory discovery still excludes the extension
+itself. Static results supplement source reads and tests; they do not prove behavioral independence.
 
 ## Repository service
 

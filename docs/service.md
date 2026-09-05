@@ -1,7 +1,7 @@
 # Repository service
 
 Experimental protocol v1, Linux/macOS only. One canonical-root owner maintains a watched
-index and immutable generations. The bundled Pi extension still uses directory diffs.
+index and immutable generations. The [repo-local Pi extension](../README.md#pi) shares this service.
 
 ## Run
 
