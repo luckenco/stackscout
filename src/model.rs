@@ -78,9 +78,11 @@ pub(crate) enum CallTarget {
     SelfAssociated(String),
     /// A qualified call such as `store.work()` or `crate::store::work()`.
     Path(Vec<String>),
+    /// A Rust method call through a receiver whose type is not known syntactically.
+    Method(Vec<String>),
     /// A TypeScript constructor call such as `new Worker()`.
     Constructor(Vec<String>),
-    /// A bare TypeScript call shadowed by a parameter or local binding.
+    /// A bare call shadowed by a parameter or local binding.
     Bound(String),
 }
 
@@ -91,7 +93,7 @@ impl fmt::Display for CallTarget {
             Self::ThisMethod(name) => write!(f, "this.{name}"),
             Self::SelfMethod(name) => write!(f, "self.{name}"),
             Self::SelfAssociated(name) => write!(f, "Self::{name}"),
-            Self::Path(path) => f.write_str(&path.join("::")),
+            Self::Path(path) | Self::Method(path) => f.write_str(&path.join("::")),
             Self::Constructor(path) => write!(f, "new {}", path.join(".")),
             Self::Bound(name) => f.write_str(name),
         }
@@ -110,6 +112,16 @@ pub(crate) struct Import {
     pub(crate) local: String,
     pub(crate) target: ImportTarget,
     pub(crate) source: String,
+}
+
+/// An explicit Rust `use` binding in one lexical scope of its owning file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RustImport {
+    pub(crate) module: Vec<String>,
+    pub(crate) scope: SourceRange,
+    /// `*` marks an unexpanded glob; its path is empty.
+    pub(crate) local: String,
+    pub(crate) path: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +181,7 @@ pub(crate) struct FileArtifact {
     pub(crate) path: String,
     pub(crate) symbols: Vec<LocalSymbol>,
     pub(crate) imports: Vec<Import>,
+    pub(crate) rust_imports: Vec<RustImport>,
     pub(crate) exports: Vec<ExportBinding>,
 }
 

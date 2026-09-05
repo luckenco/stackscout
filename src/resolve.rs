@@ -1,10 +1,12 @@
+mod rust;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::model::{
     CallTarget, ExportBinding, ExportName, FileArtifact, Import, ImportTarget, Language, LocalStep,
     LocalSymbol, Resolution, ResolvedCall, ResolvedProgram, ResolvedStep, ResolvedSymbol,
-    SymbolKey,
+    SourceRange, SymbolKey,
 };
 
 pub(crate) fn program<'a>(
@@ -15,10 +17,6 @@ pub(crate) fn program<'a>(
         .iter()
         .flat_map(|artifact| artifact.symbols.iter())
         .collect::<Vec<_>>();
-    let imports = artifacts
-        .iter()
-        .map(|artifact| (artifact.path.as_str(), artifact.imports.as_slice()))
-        .collect::<BTreeMap<_, _>>();
     let exports = artifacts
         .iter()
         .map(|artifact| (artifact.path.as_str(), artifact.exports.as_slice()))
@@ -29,14 +27,7 @@ pub(crate) fn program<'a>(
         for symbol in &artifact.symbols {
             symbols.push(ResolvedSymbol {
                 symbol: symbol.clone(),
-                steps: resolve_steps(
-                    &symbol.steps,
-                    symbol,
-                    artifact.language,
-                    imports.get(artifact.path.as_str()).copied().unwrap_or(&[]),
-                    &exports,
-                    &all_symbols,
-                ),
+                steps: resolve_steps(&symbol.steps, symbol, artifact, &exports, &all_symbols),
             });
         }
     }
@@ -47,8 +38,7 @@ pub(crate) fn program<'a>(
 fn resolve_steps(
     steps: &[LocalStep],
     caller: &LocalSymbol,
-    language: Language,
-    imports: &[Import],
+    artifact: &FileArtifact,
     exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &[&LocalSymbol],
 ) -> Vec<ResolvedStep> {
@@ -56,7 +46,14 @@ fn resolve_steps(
         .iter()
         .map(|step| match step {
             LocalStep::Call(call) => ResolvedStep::Call(ResolvedCall {
-                resolution: target(caller, &call.target, language, imports, exports, symbols),
+                resolution: target(
+                    caller,
+                    &call.target,
+                    &call.location,
+                    artifact,
+                    exports,
+                    symbols,
+                ),
                 location: call.location.clone(),
             }),
             LocalStep::Branch {
@@ -68,7 +65,7 @@ fn resolve_steps(
                 key: key.clone(),
                 label: label.clone(),
                 location: location.clone(),
-                children: resolve_steps(children, caller, language, imports, exports, symbols),
+                children: resolve_steps(children, caller, artifact, exports, symbols),
             },
         })
         .collect()
@@ -77,26 +74,24 @@ fn resolve_steps(
 fn target(
     caller: &LocalSymbol,
     target: &CallTarget,
-    language: Language,
-    imports: &[Import],
+    location: &SourceRange,
+    artifact: &FileArtifact,
     exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &[&crate::model::LocalSymbol],
 ) -> Resolution {
+    if artifact.language == Language::Rust {
+        return rust::resolve(caller, target, location, &artifact.rust_imports, symbols);
+    }
+    let imports = &artifact.imports;
     let mut candidates = BTreeSet::new();
     match target {
         CallTarget::Bare(name) => {
-            if language == Language::Rust {
-                let mut qualified = caller.module.clone();
-                qualified.push(name.clone());
-                same_file(&caller.key, &qualified, symbols, &mut candidates);
-            } else {
-                same_file(
-                    &caller.key,
-                    std::slice::from_ref(name),
-                    symbols,
-                    &mut candidates,
-                );
-            }
+            same_file(
+                &caller.key,
+                std::slice::from_ref(name),
+                symbols,
+                &mut candidates,
+            );
             for import in imports.iter().filter(|import| import.local == *name) {
                 match &import.target {
                     ImportTarget::Named(imported) => imported_symbol(
@@ -122,6 +117,7 @@ fn target(
             }
         }
         CallTarget::Bound(_) => return Resolution::Uncertain(target.clone()),
+        CallTarget::Method(_) => return Resolution::Unresolved(target.clone()),
         CallTarget::ThisMethod(name)
         | CallTarget::SelfMethod(name)
         | CallTarget::SelfAssociated(name) => {
@@ -131,7 +127,7 @@ fn target(
             same_file(&caller.key, &qualified, symbols, &mut candidates);
         }
         CallTarget::Path(path) => {
-            if language == Language::TypeScript && path.len() > 1 {
+            if path.len() > 1 {
                 same_file(&caller.key, &static_suffix(path), symbols, &mut candidates);
             } else {
                 same_file(&caller.key, path, symbols, &mut candidates);
@@ -172,9 +168,6 @@ fn target(
                         }
                     }
                 }
-            }
-            if language == Language::Rust {
-                rust_path(caller, path, symbols, &mut candidates);
             }
         }
         CallTarget::Constructor(path) => {
@@ -228,6 +221,10 @@ fn target(
         }
     }
 
+    resolution(target, candidates)
+}
+
+fn resolution(target: &CallTarget, mut candidates: BTreeSet<SymbolKey>) -> Resolution {
     match candidates.len() {
         0 => Resolution::Unresolved(target.clone()),
         1 => Resolution::Resolved(candidates.pop_first().expect("one candidate exists")),
@@ -344,64 +341,4 @@ fn clean(path: PathBuf) -> PathBuf {
         }
     }
     output
-}
-
-fn rust_path(
-    caller: &LocalSymbol,
-    path: &[String],
-    symbols: &[&LocalSymbol],
-    output: &mut BTreeSet<SymbolKey>,
-) {
-    let mut qualified = rust_module(&caller.key.file);
-    qualified.extend(caller.module.clone());
-    let mut offset = 0;
-    match path.first().map(String::as_str) {
-        Some("crate") => {
-            qualified.clear();
-            offset = 1;
-        }
-        Some("self") => offset = 1,
-        Some("super") => {
-            while path.get(offset).is_some_and(|part| part == "super") {
-                qualified.pop();
-                offset += 1;
-            }
-        }
-        _ => {}
-    }
-    qualified.extend_from_slice(&path[offset..]);
-    if qualified.is_empty() {
-        return;
-    }
-
-    for symbol in symbols
-        .iter()
-        .filter(|symbol| symbol.key.language == Language::Rust)
-    {
-        let mut identity = rust_module(&symbol.key.file);
-        identity.extend(symbol.key.qualified_name.clone());
-        if identity == qualified {
-            output.insert(symbol.key.clone());
-        }
-    }
-}
-
-fn rust_module(file: &str) -> Vec<String> {
-    let path = Path::new(file);
-    let mut parts = path
-        .parent()
-        .into_iter()
-        .flat_map(Path::components)
-        .filter_map(|part| part.as_os_str().to_str())
-        .filter(|part| *part != "src")
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    if !matches!(stem, "lib" | "main" | "mod") {
-        parts.push(stem.to_owned());
-    }
-    parts
 }

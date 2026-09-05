@@ -1,0 +1,3 @@
+~ rust:lib.rs::run
+-   rust:lib.rs::left::Worker::new
++   rust:lib.rs::right::Worker::new

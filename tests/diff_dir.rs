@@ -120,6 +120,26 @@ fn resolution_changes_when_defining_files_change() {
 }
 
 #[test]
+fn rust_use_imports_resolve_modules_types_aliases_and_functions() {
+    fixture("rust-use-imports");
+}
+
+#[test]
+fn rust_use_changes_update_unchanged_callers() {
+    fixture("rust-use-transition");
+}
+
+#[test]
+fn rust_use_bindings_respect_lexical_scope_and_shadowing() {
+    fixture("rust-use-scope");
+}
+
+#[test]
+fn rust_use_bindings_preserve_ambiguity_and_unknown_alternatives() {
+    fixture("rust-use-ambiguity");
+}
+
+#[test]
 fn rust_calls_resolve_inside_inline_modules() {
     fixture("rust-inline-module");
 }

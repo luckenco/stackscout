@@ -1,0 +1,8 @@
+  rust:lib.rs::run
+    [ambiguous: Worker::new -> rust:lib.rs::left::Worker::new, rust:lib.rs::right::Worker::new]
+~     rust:lib.rs::left::Worker::new
++       rust:lib.rs::left::audit
+      rust:lib.rs::right::Worker::new
+
+~ rust:lib.rs::unknown::run
++   [unresolved: Worker::new]

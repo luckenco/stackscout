@@ -1,0 +1,30 @@
+~ rust:lib.rs::constructor
+    if let Some(v) = value
++     [unresolved: Some]
+
+  rust:lib.rs::nested::deeper::run
+~   rust:lib.rs::left::Worker::new
++     rust:lib.rs::left::audit
+
+  rust:lib.rs::nested::inner
+~   rust:lib.rs::right::Worker::new
++     rust:lib.rs::right::audit
+~   rust:lib.rs::right::Worker::new
++     rust:lib.rs::right::audit
+
+  rust:lib.rs::outer
+~   rust:lib.rs::left::Worker::new
++     rust:lib.rs::left::audit
+~   rust:lib.rs::right::Worker::new
++     rust:lib.rs::right::audit
+~   rust:lib.rs::left::Worker::new
++     rust:lib.rs::left::audit
+~   rust:lib.rs::left::work
++     rust:lib.rs::left::audit
+
+  rust:lib.rs::relative::run
+~   rust:lib.rs::relative::left::Worker::new
++     rust:lib.rs::relative::left::audit
+
+~ rust:lib.rs::wildcard
++   [unresolved: Worker::new]

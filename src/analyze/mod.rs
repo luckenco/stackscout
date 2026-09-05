@@ -53,7 +53,7 @@ pub(crate) struct Directory {
 }
 
 // Bump when extraction semantics change. Parser mode distinguishes TS from TSX.
-pub(crate) const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 3;
 
 pub(crate) struct Analyzers {
     rust: Parser,

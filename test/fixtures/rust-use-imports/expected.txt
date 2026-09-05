@@ -1,0 +1,15 @@
+  rust:src/api.rs::alias
+~   rust:src/worker.rs::Worker::new
++     rust:src/worker.rs::audit
+
+  rust:src/api.rs::direct
+~   rust:src/worker.rs::Worker::new
++     rust:src/worker.rs::audit
+
+  rust:src/api.rs::function
+~   rust:src/worker.rs::save
++     rust:src/worker.rs::audit
+
+  rust:src/api.rs::grouped
+~   rust:src/worker.rs::Worker::new
++     rust:src/worker.rs::audit

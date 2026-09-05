@@ -88,6 +88,13 @@ StackScout is an early prototype. It does **not** currently:
 - support languages other than Rust and TypeScript; or
 - provide compiler- or typechecker-complete call resolution.
 
+Rust resolves explicit `use` bindings—including groups, aliases, and `crate`/`self`/`super`
+paths—for free and associated-function calls. Bindings are scoped to their modules and blocks;
+known local shadowing does not become an imported call edge. Conflicting known targets remain
+ambiguous, while unexpanded globs and imports with unknown alternatives remain unresolved.
+This assumes Rust 2018+ paths and conventional file layouts, not Cargo-aware crate boundaries;
+re-export chains, `#[path]` modules, and inferred receiver types are not resolved.
+
 The graph is conservative and syntactic. Dynamic dispatch, reflection, Rust macro expansion,
 TypeScript type-driven method resolution, generated code, and calls outside the compared trees may
 remain unresolved. Parse-failure transitions are reported as incomplete rather than presented as

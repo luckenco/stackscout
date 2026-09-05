@@ -24,6 +24,7 @@ pub(super) fn extract(
         path: path.to_owned(),
         symbols: Vec::new(),
         imports: Vec::new(),
+        rust_imports: Vec::new(),
         exports: Vec::new(),
     };
     imports(path, source, root, &mut artifact.imports)?;
