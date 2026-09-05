@@ -165,7 +165,17 @@ live("cancelling a spawned request leaves the owner and checkpoint usable, then 
 		}
 		app.child.kill("SIGUSR2");
 		expect((await pending).isError).toBe(true);
-		expect(() => process.kill(requestPid, 0)).toThrow();
+		// The cancelled tool can return before the OS reaps its subprocess (observed on Linux).
+		const stopped = Date.now() + 6000;
+		for (;;) {
+			try { process.kill(requestPid, 0); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+				break;
+			}
+			if (Date.now() > stopped) throw new Error("Cancelled StackScout request did not exit");
+			await Bun.sleep(10);
+		}
 	} finally {
 		process.kill(ownerPid, "SIGCONT");
 	}
