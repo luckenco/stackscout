@@ -48,6 +48,19 @@ stop any old owner before starting a new session: running owners do not reload e
   finds bounded call paths and source ranges. Use unique names or `language:file::qualified::name`.
 - `call_graph_diff({refresh?, diagnostics?})` compares against the immutable session-start checkpoint.
   Changes are aggregate workspace changes, not one agent's authorship. Drill down with `call_graph`.
+- `call_graph_review({files?: string[], symbols?: string[], refresh?})` reviews changes relevant
+  to an explicit scope since its last acknowledgement (initially session start). Supply 1–16
+  repository-relative files and/or symbol selectors. Before/after witness paths retain removed
+  edges, dependencies, callers, source ranges, and uncertainty; unrelated changes are omitted.
+- `call_graph_ack({review, token})` explicitly acknowledges the review name/token returned above.
+  It advances **only that scope to that result's generation**, never later unseen writes or the
+  session baseline. Inspect warnings and any omitted evidence before acknowledging; this is not
+  a completeness or correctness certificate. A newer review supersedes older unacknowledged tokens.
+
+For example, review `{files: ["src/query.rs"], refresh: true}`, inspect its paths, then acknowledge
+its returned review name/token. Another scope has independent review history. Reload/resume retains
+reviews in the same owner. `forget_review` releases a review explicitly; its next use reports a reset
+back to the original session checkpoint, never a late worktree capture. See [scoped review](docs/service.md#scoped-review).
 
 Startup reconciles saved files before capture; rescans read source bytes but reuse unchanged analysis.
 Successful `edit`/`write` results await path sync. Failed sync adds a warning without misreporting the
@@ -62,7 +75,7 @@ forgotten checkpoints, and failed/interrupted capture make the baseline unavaila
 recaptured. Current-graph queries remain usable. Upgrading from the directory adapter requires a new
 session. Cancellation stops only client requests, not the owner or saved-write acknowledgement;
 disconnected service mutations may still finish. Shutdown retains checkpoints for resume, up to the
-service's 64-checkpoint limit; use `request` with `forget` and the checkpoint name from tool details
+service's 64-slot retention limit (each review reserves two slots); use `request` with `forget` and the checkpoint name from tool details
 to release one explicitly. No automatic eviction or owner shutdown.
 
 Results include generations, locations, analysis issues, watcher health, uncertainty, and truncation.
@@ -128,8 +141,10 @@ Unit lifecycle tests use a stub Pi API. Live tests launch isolated Node/Pi SDK p
 scripted model responses but real extension loading, agent loops, tools, persistence, service
 execution, and truncation. They require Node and Pi on PATH (or `STACKSCOUT_PI_PACKAGE` pointing
 to its installed package directory); missing Pi skips live tests explicitly. No npm install is
-needed. Live fixtures disable watching to prove explicit sync rather than incidental watcher
-freshness. Milestone 4 integration was verified on macOS; Linux integration verification is deferred.
+needed for a development Pi install; standalone bundled installs also need the matching
+`@earendil-works/pi-ai` package beside Pi for scripted responses. Live fixtures disable watching
+to prove explicit sync rather than incidental watcher freshness. Integration checks passed on
+macOS and Linux arm64 (Docker with an init process).
 For resolver measurements and the manual benchmark, see [performance](docs/performance.md).
 
 [MIT License](LICENSE)

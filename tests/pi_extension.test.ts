@@ -13,7 +13,7 @@ mock.module("@earendil-works/pi-coding-agent", () => ({
 }));
 mock.module("@earendil-works/pi-ai", () => ({ StringEnum: () => ({}) }));
 mock.module("typebox", () => ({ Type: {
-	Object: () => ({}), Optional: () => ({}), Boolean: () => ({}), String: () => ({}), Integer: () => ({}),
+	Object: () => ({}), Array: () => ({}), Optional: () => ({}), Boolean: () => ({}), String: () => ({}), Integer: () => ({}),
 } }));
 const { default: extension } = await import("../.pi/extensions/stackscout.ts");
 
@@ -22,7 +22,7 @@ beforeEach(async () => { cwd = await realpath(await mkdtemp(join(tmpdir(), "stac
 afterEach(async () => { mock.restore(); await rm(cwd, { recursive: true, force: true }); });
 
 type Entry = { type: "custom"; customType: string; data: unknown };
-type Operation = { op: string; paths?: string[]; name?: string };
+type Operation = { op: string; paths?: string[]; name?: string; baseline?: string; baseline_generation?: number; scope?: { files: string[]; symbols: string[] }; token?: string };
 
 function harness(
 	handle: (operation: Operation, signal?: AbortSignal) => object | Promise<object> = () => ({}),
@@ -348,6 +348,69 @@ test("shutdown cancels client requests but does not forget checkpoints", async (
 	await app.close();
 	await expect(app.run()).rejects.toThrow("session closed");
 	expect(app.calls.some((call) => call.op === "forget")).toBe(false);
+});
+
+test("scoped review names survive reload, canonicalize scope, and keep session baseline immutable", async () => {
+	const handle = (op: Operation) => op.op === "review" ? {
+		generation: 2, review_token: "owner-1:1", review_initialized: true,
+		review: { witnesses: [], boundaries: [], missing: [{ side: "after", selector: "absent", reason: "unknown symbol" }], analysis_issues: ["broken.ts"], truncated: false },
+	} : {};
+	const app = harness(handle);
+	await app.start();
+	const entries = [...app.entries];
+	const result = await app.run("call_graph_review", { files: ["b.ts", "a.ts", "a.ts"], refresh: true });
+	const review = app.calls.at(-1)!;
+	expect(review).toMatchObject({ op: "review", baseline_generation: 1, scope: { files: ["a.ts", "b.ts"], symbols: [] } });
+	expect(app.calls.at(-2)?.op).toBe("rescan");
+	expect(app.entries).toEqual(entries);
+	expect(result.details).toMatchObject({ baseline: { generation: 1 }, review_token: "owner-1:1" });
+	for (const word of ["Not acknowledged", "original session checkpoint", "missing scope", "broken.ts"]) {
+		expect((result.content[0] as { text: string }).text).toContain(word);
+	}
+	const resumed = harness(handle, app.entries);
+	await resumed.start("reload");
+	await resumed.run("call_graph_review", { files: ["a.ts", "b.ts"] });
+	expect(resumed.calls.at(-1)?.name).toBe(review.name);
+	await resumed.run("call_graph_review", { files: ["a.ts"] });
+	expect(resumed.calls.at(-1)?.name).not.toBe(review.name);
+});
+
+test("review acknowledgement does not rescan or acknowledge another session/owner", async () => {
+	const app = harness((op) => op.op === "acknowledge" ? { generation: 3, checkpoint_generation: 2 } : {});
+	await app.start();
+	const name = `${app.calls.at(-1)!.name}-review-scope`;
+	const start = app.calls.length;
+	const result = await app.run("call_graph_ack", { review: name, token: "owner-1:1" });
+	expect(app.calls.slice(start)).toEqual([{ version: 1, op: "acknowledge", name, token: "owner-1:1" }]);
+	expect(result.details).toMatchObject({ generation: 3, checkpoint_generation: 2, baseline: { generation: 1 } });
+	await expect(app.run("call_graph_ack", { review: name, token: "owner-2:1" })).rejects.toThrow("does not belong");
+	await expect(app.run("call_graph_ack", { review: "other", token: "owner-1:1" })).rejects.toThrow("does not belong");
+});
+
+test("cancelling a review never acknowledges its pending result", async () => {
+	const controller = new AbortController();
+	const app = harness((op) => {
+		if (op.op === "review") controller.abort(new Error("review cancelled"));
+		return {};
+	});
+	await app.start();
+	const entries = [...app.entries];
+	await expect(app.run("call_graph_review", { symbols: ["run"] }, controller.signal)).rejects.toThrow("review cancelled");
+	expect(app.calls.some((op) => op.op === "acknowledge")).toBe(false);
+	expect(app.entries).toEqual(entries);
+});
+
+test("review cannot create a late baseline after capture failure or owner restart", async () => {
+	const app = harness((op) => ({ error: op.op === "checkpoint" ? "capture failed" : null }));
+	await app.start();
+	await expect(app.run("call_graph_review", { symbols: ["run"] })).rejects.toThrow("capture failed");
+	expect(app.calls.some((op) => op.op === "review")).toBe(false);
+	let instance = "owner-1";
+	const restarted = harness(() => ({ instance }));
+	await restarted.start();
+	instance = "owner-2";
+	await expect(restarted.run("call_graph_review", { symbols: ["run"] })).rejects.toThrow("baseline unavailable");
+	expect(restarted.calls.some((op) => op.op === "review")).toBe(false);
 });
 
 test("output exposes health, uncertainty, and service truncation even for empty diffs", async () => {

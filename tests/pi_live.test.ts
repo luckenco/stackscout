@@ -143,6 +143,61 @@ live("two real Pi processes share parsing, acknowledge edit/write, and preserve 
 	expect((await resumed.send({ name: "call_graph", params: { action: "impact", symbol: "audit" } })).isError).toBe(false);
 }, 60_000);
 
+live("scoped review keeps concurrent later writes visible across acknowledgement, reload, and resume", async () => {
+	await writeFile(join(root, "api.ts"), 'import { audit } from "./dep";\nexport function run() { audit(); }\n');
+	await writeFile(join(root, "other.ts"), "export function unrelated() {}\n");
+	const writer = await client();
+	let reviewer = await client();
+	expect(reviewer.ready.tools).toContain("call_graph_review");
+	expect(reviewer.ready.tools).toContain("call_graph_ack");
+	const baseline = reviewer.ready.baseline;
+	expect(request({ op: "status" }).files_parsed).toBe(3);
+	await writer.send({ name: "write", params: { path: "dep.ts", content: "export function audit() { first(); }\n" } });
+	await writer.send({ name: "write", params: { path: "other.ts", content: "export function unrelated() { noise(); }\n" } });
+	const inspected = await reviewer.send({ name: "call_graph_review", params: { files: ["api.ts"] } });
+	expect(inspected.isError).toBe(false);
+	expect(inspected.details.checkpoint_generation).toBe(baseline.generation);
+	expect(inspected.content[0].text).toContain("dependency modified");
+	expect(inspected.content[0].text).toContain("first");
+	expect(inspected.content[0].text).not.toContain("noise");
+	expect(inspected.content[0].text.length).toBeLessThan(5000);
+	await writer.send({ name: "write", params: { path: "dep.ts", content: "export function audit() { later(); }\n" } });
+	const params = { review: inspected.details.review_name, token: inspected.details.review_token };
+	const ack = await reviewer.send({ name: "call_graph_ack", params });
+	expect(ack.isError).toBe(false);
+	expect(ack.details.checkpoint_generation).toBe(inspected.details.generation);
+	expect(ack.details.generation).toBeGreaterThan(inspected.details.generation);
+	expect((await reviewer.send({ name: "call_graph_ack", params })).isError).toBe(false);
+	const parses = request({ op: "status" }).files_parsed;
+	for (const phase of ["reload", "resume"]) {
+		if (phase === "reload") {
+			expect((await reviewer.send({ op: "reload" })).baseline).toEqual(baseline);
+		} else {
+			reviewer.child.stdin.end();
+			await reviewer.exited;
+			reviewer = await client(reviewer.ready.sessionFile);
+		}
+		const later = await reviewer.send({ name: "call_graph_review", params: { files: ["api.ts"] } });
+		expect(later.isError).toBe(false);
+		expect(later.details.review_initialized).toBe(false);
+		expect(later.details.checkpoint_generation).toBe(inspected.details.generation);
+		expect(later.content[0].text).toContain("later");
+	}
+	expect(request({ op: "status" }).files_parsed).toBe(parses);
+	const other = await reviewer.send({ name: "call_graph_review", params: { files: ["other.ts"] } });
+	expect(other.details.checkpoint_generation).toBe(baseline.generation);
+	expect(other.content[0].text).toContain("noise");
+	const diff = await reviewer.send({ name: "call_graph_diff" });
+	expect(diff.details.checkpoint_generation).toBe(baseline.generation);
+	expect(diff.details.diff).toContain("noise");
+	const stale = await reviewer.send({ name: "call_graph_review", params: { files: ["api.ts"] } });
+	const latest = await reviewer.send({ name: "call_graph_review", params: { files: ["api.ts"] } });
+	expect((await reviewer.send({ name: "call_graph_ack", params: { review: stale.details.review_name, token: stale.details.review_token } })).isError).toBe(true);
+	expect((await reviewer.send({ name: "call_graph_ack", params: { review: latest.details.review_name, token: latest.details.review_token } })).isError).toBe(false);
+	const clean = await reviewer.send({ name: "call_graph_review", params: { files: ["api.ts"] } });
+	expect(clean.details.review.witnesses).toEqual([]);
+}, 60_000);
+
 live("cancelling a spawned request leaves the owner and checkpoint usable, then exits cleanly", async () => {
 	const app = await client();
 	const owner = request({ op: "status" }).instance;

@@ -21,12 +21,19 @@ type Graph = {
 	symbols: { id: string; file: string; location: Range; depth: number }[];
 	calls: { caller: string; callee: string | null; target: string; resolution: string; location: Range }[];
 };
+type Review = {
+	witnesses: { side: string; relation: string; change: string; scope: string; symbol: Graph["symbols"][number]; path: Graph["calls"]; calls: Graph["calls"] }[];
+	boundaries: { side: string; call: Graph["calls"][number] }[];
+	missing: { side: string; selector: string; reason: string }[];
+	analysis_issues: string[]; truncated: boolean;
+};
 type Response = {
 	version: number; root: string; instance: string; generation: number | null;
 	index_complete: boolean; watching: boolean; recovery_needed: boolean;
 	watcher_error: string | null; last_update_error: string | null;
 	analysis_issue_count: number; analysis_issues: string[]; progress: unknown;
 	checkpoint_generation: number | null; diff: string | null; graph: Graph | null;
+	review?: Review | null; review_name?: string | null; review_token?: string | null; review_initialized?: boolean;
 	truncated: boolean; error: string | null;
 };
 
@@ -226,6 +233,49 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "call_graph_review",
+		label: "Scoped call graph review",
+		description: "Show changes relevant to explicit repository-relative files or symbols since this scope's last acknowledgement (initially session start). Before/after witness paths include dependencies, callers, removals, and uncertainty. Bounded to 2000 lines / 50 KiB. Does not acknowledge or advance the session baseline.",
+		promptSnippet: "Review changes relevant to files/symbols since their last explicit acknowledgement",
+		promptGuidelines: ["Use call_graph_review for repeated scoped checks. Inspect warnings and paths before call_graph_ack; acknowledgement applies only to that exact scope and inspected generation, not later writes or other scopes."],
+		parameters: Type.Object({
+			files: Type.Optional(Type.Array(Type.String(), { maxItems: 16 })),
+			symbols: Type.Optional(Type.Array(Type.String(), { maxItems: 16 })),
+			refresh: REFRESH,
+		}),
+		async execute(_id, { files = [], symbols = [], refresh }, signal, _onUpdate, ctx) {
+			const saved = requireBaseline();
+			const scope = { files: [...new Set(files)].sort(), symbols: [...new Set(symbols)].sort() };
+			const name = `${saved.name}-review-${createHash("sha256").update(JSON.stringify(scope)).digest("hex")}`;
+			const expected = await prepare(ctx, signal, refresh);
+			requireBaseline();
+			const response = await send(ctx, { op: "review", name, baseline: saved.name, baseline_generation: saved.generation, scope }, signal);
+			checkGeneration(response, expected);
+			if (!response.review || typeof response.review_token !== "string") throw new Error("Service returned no scoped review/token; upgrade the owner and start a new session");
+			const header = `Review: ${JSON.stringify(name)}; token: ${JSON.stringify(response.review_token)}\n`
+				+ (response.review_initialized ? "Review initialized from the original session checkpoint.\n" : "")
+				+ "Not acknowledged. Inspect evidence and omissions before call_graph_ack({review, token}). Session baseline is unchanged.\n";
+			return output(response, baseline, header + reviewText(response.review), signal);
+		},
+	});
+
+	pi.registerTool({
+		name: "call_graph_ack",
+		label: "Acknowledge scoped review",
+		description: "Explicitly acknowledge a call_graph_review result using its review name and token. Advances only that scope to the inspected generation, never newer unseen writes. Inspect partial evidence/warnings before acknowledging. Stale/superseded tokens are rejected; retries are safe.",
+		parameters: Type.Object({ review: Type.String(), token: Type.String() }),
+		async execute(_id, { review, token }, signal, _onUpdate, ctx) {
+			const saved = requireBaseline();
+			if (!review.startsWith(`${saved.name}-review-`) || !token.startsWith(`${saved.instance}:`)) {
+				throw new Error("Review/token does not belong to this session and service instance");
+			}
+			const response = await send(ctx, { op: "acknowledge", name: review, token }, signal);
+			checkGeneration(response, saved);
+			return output(response, baseline, `Acknowledged ${JSON.stringify(review)} through generation ${response.checkpoint_generation}. Later changes remain unreviewed; session baseline unchanged.`, signal);
+		},
+	});
+
+	pi.registerTool({
 		name: "call_graph_diff",
 		label: "Call graph diff",
 		description: "Compare saved Rust/TypeScript call paths against the immutable Pi session-start checkpoint. Includes aggregate workspace changes, not authorship. Bounded to 2000 lines / 50 KiB; service truncation is explicit.",
@@ -332,6 +382,20 @@ function graphText(graph: Graph): string {
 	for (const call of graph.calls) {
 		lines.push(`${JSON.stringify(call.caller)} @ ${range(call.location)} -> ${JSON.stringify(call.callee ?? call.target)} [${call.resolution}]`);
 	}
+	return lines.join("\n");
+}
+
+function reviewText(review: Review): string {
+	const lines: string[] = [];
+	for (const witness of review.witnesses) {
+		lines.push(`${witness.side} ${witness.relation} ${witness.change}: ${JSON.stringify(witness.symbol.id)} @ ${JSON.stringify(witness.symbol.file)}:${range(witness.symbol.location)} (scope ${JSON.stringify(witness.scope)})`);
+		for (const call of witness.path) lines.push(`  path: ${JSON.stringify(call.caller)} @ ${range(call.location)} -> ${JSON.stringify(call.callee ?? call.target)} [${call.resolution}]`);
+		for (const call of witness.calls) lines.push(`  call: ${JSON.stringify(call.caller)} @ ${range(call.location)} -> ${JSON.stringify(call.callee ?? call.target)} [${call.resolution}]`);
+	}
+	if (!review.witnesses.length) lines.push("No relevant semantic changes found in the bounded analyzed graph; inspect omissions below.");
+	for (const boundary of review.boundaries) lines.push(`${boundary.side} boundary: ${JSON.stringify(boundary.call.caller)} @ ${range(boundary.call.location)} -> ${JSON.stringify(boundary.call.callee ?? boundary.call.target)} [${boundary.call.resolution}]`);
+	for (const missing of review.missing) lines.push(`${missing.side} missing scope: ${JSON.stringify(missing.selector)}: ${missing.reason}`);
+	for (const issue of review.analysis_issues) lines.push(`Before/after analysis issue: ${JSON.stringify(issue)}`);
 	return lines.join("\n");
 }
 
