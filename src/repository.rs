@@ -153,7 +153,7 @@ impl Repository {
         let before = self.checkpoints.get(name).ok_or_else(|| Error {
             message: format!("unknown checkpoint: {name}"),
         })?;
-        before.compare(&self.current, diagnostics)
+        before.compare(&self.current, diagnostics, false)
     }
 }
 
@@ -228,7 +228,12 @@ impl Snapshot {
         Ok(())
     }
 
-    pub(crate) fn compare(&self, after: &Self, diagnostics: bool) -> Result<String, Error> {
+    pub(crate) fn compare(
+        &self,
+        after: &Self,
+        diagnostics: bool,
+        locations: bool,
+    ) -> Result<String, Error> {
         let before_issues = self
             .files
             .values()
@@ -245,14 +250,18 @@ impl Snapshot {
             .map(|issue| issue.path.clone())
             .collect::<BTreeSet<_>>();
         if omitted.is_empty() {
-            return Ok(render::render(&diff::compare(&self.graph, &after.graph)));
+            return Ok(render::render_with_locations(
+                &diff::compare(&self.graph, &after.graph),
+                locations,
+            ));
         }
 
         // A failed path must be omitted from BOTH graphs, including resolution.
         // Checkpoints retain artifacts so this never needs to read or parse sources.
         let before_graph = self.without(&omitted)?;
         let after_graph = after.without(&omitted)?;
-        let output = render::render(&diff::compare(&before_graph, &after_graph));
+        let output =
+            render::render_with_locations(&diff::compare(&before_graph, &after_graph), locations);
         Ok(crate::render_issues(
             &before_issues,
             &after_issues,

@@ -25,7 +25,7 @@ fn parallel_scans_match_every_fixture_in_both_directions() {
                 let updated = refresh(&shared, &mut repo, &pool, None);
                 assert!(updated.error.is_none(), "{:?}", updated.error);
                 assert_eq!(
-                    baseline.compare(&repo.snapshot(), true).unwrap(),
+                    baseline.compare(&repo.snapshot(), true, false).unwrap(),
                     crate::diff_dirs_with_diagnostics(fixture.join(before), fixture.join(after))
                         .unwrap(),
                     "{} with {threads} threads",

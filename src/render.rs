@@ -9,7 +9,7 @@ pub(crate) fn render(diff: &GraphDiff) -> String {
     render_with_locations(diff, false)
 }
 
-fn render_with_locations(diff: &GraphDiff, locations: bool) -> String {
+pub(crate) fn render_with_locations(diff: &GraphDiff, locations: bool) -> String {
     let mut output = String::new();
     let unchanged = &diff.unchanged;
     for (index, root) in diff.roots.iter().enumerate() {
@@ -144,8 +144,14 @@ fn line(output: &mut String, marker: char, depth: usize, node: &TreeNode, locati
     if locations && let Some(location) = location {
         write!(
             output,
-            " @ {}:{}-{}:{}",
-            location.start_line, location.start_column, location.end_line, location.end_column
+            " @ {:?}:{}:{}-{}:{}",
+            node.location_file
+                .as_ref()
+                .expect("a source range has a file"),
+            location.start_line,
+            location.start_column,
+            location.end_line,
+            location.end_column
         )
         .expect("writing to a string cannot fail");
     }
@@ -166,10 +172,10 @@ mod tests {
             &crate::build(&after.artifacts).unwrap(),
         );
         let output = super::render_with_locations(&diff, true);
-        assert!(output.contains(" @ 2:5-3:13\n"), "{output}");
-        assert!(output.contains(" @ 2:5-2:27\n"), "{output}");
+        assert!(output.contains(" @ \"lib.rs\":2:5-3:13\n"), "{output}");
+        assert!(output.contains(" @ \"lib.rs\":2:5-2:27\n"), "{output}");
         assert!(
-            output.contains("rust:lib.rs::make @ 2:5-2:18\n"),
+            output.contains("rust:lib.rs::make @ \"lib.rs\":2:5-2:18\n"),
             "{output}"
         );
         assert_eq!(output.lines().count(), 4);

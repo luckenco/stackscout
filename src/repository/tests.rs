@@ -135,11 +135,11 @@ fn failed_batches_preserve_published_snapshots_and_all_files() {
         .unwrap();
     assert!(
         published
-            .compare(&repo.snapshot(), false)
+            .compare(&repo.snapshot(), false, false)
             .unwrap()
             .contains("unknown")
     );
-    assert_eq!(published.compare(&published, false).unwrap(), "");
+    assert_eq!(published.compare(&published, false, false).unwrap(), "");
 }
 
 #[test]

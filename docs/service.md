@@ -67,6 +67,11 @@ Queries pin one generation and traverse outside the publication lock. Responses 
 | `checkpoint_generation`, `diff`, `graph`, `error` | Operation-specific results; otherwise null. |
 | `truncated` | Graph limits or diff depth/node/48-KiB limit reached. Diff byte cuts preserve UTF-8 and append a marker. |
 
+Service diff text includes file-qualified ranges. `-` lines use checkpoint locations; other
+lines use the queried generation. Roots show definition ranges; descendants show call/branch
+sites (including the caller's file for cross-file calls), not callee definitions. Deleted-file
+locations remain available from the checkpoint. Directory/API diffs keep their compact format.
+
 Watching is eventually consistent even when health is green. Await explicit path sync to
 acknowledge known writes; protocol v1 has no minimum-generation query parameter. Scans read
 files at different times: atomic publication is not a filesystem-wide write transaction.

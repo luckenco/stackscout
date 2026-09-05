@@ -355,6 +355,45 @@ fn explicit_updates_publish_once_and_checkpoints_survive_reconnects() {
 }
 
 #[test]
+fn diff_locations_retain_deleted_files_and_cross_file_call_sites() {
+    let mut workspace = Workspace::new();
+    let root = workspace.root.clone();
+    fs::write(
+        root.join("api.ts"),
+        "import { gone } from './dep';\nexport function run() {\n  gone();\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("dep.ts"),
+        "export function gone() {\n  missing();\n}\n",
+    )
+    .unwrap();
+    workspace.start();
+    request(&root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    request(&root, r#"{"version":1,"op":"checkpoint","name":"before"}"#);
+    fs::write(root.join("api.ts"), "export function run() {}\n").unwrap();
+    fs::remove_file(root.join("dep.ts")).unwrap();
+    request(
+        &root,
+        r#"{"version":1,"op":"sync","paths":["api.ts","dep.ts"]}"#,
+    );
+    let result = request(&root, r#"{"version":1,"op":"diff","name":"before"}"#);
+    let diff = result["diff"].as_str().unwrap();
+    assert!(
+        diff.contains("ts:api.ts::run @ \"api.ts\":1:8-1:25"),
+        "{diff}"
+    );
+    assert!(
+        diff.contains("-   ts:dep.ts::gone @ \"api.ts\":3:3-3:9"),
+        "{diff}"
+    );
+    assert!(
+        diff.contains("[unresolved: missing] @ \"dep.ts\":2:3-2:12"),
+        "{diff}"
+    );
+}
+
+#[test]
 fn startup_racers_share_one_owner_and_crash_recovery_does_not_restore_checkpoints() {
     let mut workspace = Workspace::new();
     fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();

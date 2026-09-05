@@ -144,7 +144,10 @@ fn query(shared: &Shared, operation: Operation) -> Response {
             };
             response.checkpoint_generation = Some(before.number);
             drop(state); // Expensive comparisons must not block publication or other readers.
-            match before.snapshot.compare(&current.snapshot, diagnostics) {
+            match before
+                .snapshot
+                .compare(&current.snapshot, diagnostics, true)
+            {
                 Ok(mut output) => {
                     response.truncated = output.lines().any(|line| {
                         line.get(2..)
