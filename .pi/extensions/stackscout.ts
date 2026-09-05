@@ -34,8 +34,8 @@ export default function (pi: ExtensionAPI) {
 	let baseline: Baseline = { status: "unavailable", reason: "Session initialization has not completed" };
 	let acknowledged: Generation | undefined;
 	let root: string | undefined;
-	let writes = Promise.resolve();
-	let syncError: string | undefined;
+	let updates = Promise.resolve();
+	let needsRescan = false;
 	const lifetime = new AbortController();
 
 	function save(ctx: ExtensionContext, value: Baseline) {
@@ -72,24 +72,40 @@ export default function (pi: ExtensionAPI) {
 		return baseline;
 	}
 
-	function acknowledge(response: Response) {
-		const next = generation(response);
-		if (acknowledged?.instance === next.instance) checkGeneration(response, acknowledged);
-		acknowledged = next;
+	// All synchronization state changes run in this queue. Graph traversal stays concurrent.
+	function enqueue<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		const result = updates.then(async () => {
+			lifetime.signal.throwIfAborted();
+			signal?.throwIfAborted();
+			try {
+				return await action();
+			} catch (error) {
+				needsRescan = true;
+				throw error;
+			}
+		});
+		updates = result.then(() => {}, () => {});
+		return wait(result, signal);
 	}
 
-	// Await explicit writes, not watcher delivery. A new owner needs a full reconciliation.
-	async function prepare(ctx: ExtensionContext, signal?: AbortSignal, refresh = false) {
-		await wait(writes, signal);
-		let operation: object = { op: "sync", paths: [] };
-		if (refresh || syncError || !acknowledged) operation = { op: "rescan" };
+	// Called only inside enqueue; undefined paths request a full reconciliation.
+	async function sync(ctx: ExtensionContext, paths: string[] | undefined, signal?: AbortSignal) {
+		let operation: object = { op: "sync", paths };
+		if (paths === undefined || needsRescan || !acknowledged) operation = { op: "rescan" };
 		let response = await send(ctx, operation, signal);
 		if (acknowledged && acknowledged.instance !== response.instance) {
 			response = await send(ctx, { op: "rescan" }, signal);
 		}
-		acknowledge(response);
-		syncError = undefined;
-		return generation(response);
+		if (acknowledged?.instance === response.instance) checkGeneration(response, acknowledged);
+		acknowledged = generation(response);
+		needsRescan = false;
+		return acknowledged;
+	}
+
+	function prepare(ctx: ExtensionContext, signal?: AbortSignal, refresh = false) {
+		let paths: string[] | undefined = [];
+		if (refresh) paths = undefined;
+		return enqueue(() => sync(ctx, paths, signal), signal);
 	}
 
 	async function compare(ctx: ExtensionContext, expected: Generation, diagnostics?: boolean, signal?: AbortSignal) {
@@ -175,25 +191,15 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.isError || (event.toolName !== "edit" && event.toolName !== "write")) return;
 		// A saved write must be acknowledged even if its originating turn was cancelled.
-		const update = writes.then(async () => {
-			try {
+		try {
+			await enqueue(async () => {
 				root ??= await realpath(ctx.cwd);
 				const paths = await syncPaths(root, ctx.cwd, event.input.path);
 				if (paths?.length === 0) return;
-				let operation: object = { op: "sync", paths };
-				if (paths === undefined || syncError || !acknowledged) operation = { op: "rescan" };
-				let response = await send(ctx, operation);
-				if (acknowledged && acknowledged.instance !== response.instance) response = await send(ctx, { op: "rescan" });
-				acknowledge(response);
-				syncError = undefined;
-			} catch (error) {
-				syncError = message(error);
-			}
-		});
-		writes = update;
-		await update;
-		if (syncError) {
-			return { content: [...event.content, { type: "text" as const, text: `StackScout sync failed (file write succeeded): ${syncError}. Graph queries will retry reconciliation.` }] };
+				await sync(ctx, paths);
+			});
+		} catch (error) {
+			return { content: [...event.content, { type: "text" as const, text: `StackScout sync failed (file write succeeded): ${message(error)}. Graph queries will retry reconciliation.` }] };
 		}
 	});
 
@@ -282,7 +288,8 @@ async function request(pi: ExtensionAPI, root: string, operation: object, signal
 	return response;
 }
 
-// Match Pi's saved-file path spellings, then let service discovery enforce ignores/symlink policy.
+// Match Pi's saved-file path spellings; service discovery enforces ignores/symlink policy.
+// [] means no indexed paths; undefined means ignore configuration changed and needs a rescan.
 async function syncPaths(root: string, cwd: string, input: unknown): Promise<string[] | undefined> {
 	if (typeof input !== "string") throw new Error("Saved-file tool did not provide a path");
 	let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
@@ -302,12 +309,12 @@ async function syncPaths(root: string, cwd: string, input: unknown): Promise<str
 	return paths.filter((candidate) => /\.(rs|ts|tsx|mts|cts)$/.test(candidate) && !/\.d\.(ts|mts|cts)$/.test(candidate));
 }
 
-async function wait(promise: Promise<void>, signal?: AbortSignal) {
+async function wait<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	signal?.throwIfAborted();
 	if (!signal) return promise;
 	let abort!: () => void;
 	try {
-		await Promise.race([promise, new Promise<never>((_resolve, reject) => {
+		return await Promise.race([promise, new Promise<never>((_resolve, reject) => {
 			abort = () => reject(signal.reason);
 			signal.addEventListener("abort", abort, { once: true });
 		})]);

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import { mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ const { default: extension } = await import("../.pi/extensions/stackscout.ts");
 
 let cwd: string;
 beforeEach(async () => { cwd = await realpath(await mkdtemp(join(tmpdir(), "stackscout-test-"))); });
-afterEach(async () => { await rm(cwd, { recursive: true, force: true }); });
+afterEach(async () => { mock.restore(); await rm(cwd, { recursive: true, force: true }); });
 
 type Entry = { type: "custom"; customType: string; data: unknown };
 type Operation = { op: string; paths?: string[]; name?: string };
@@ -200,18 +201,19 @@ test("a restart between the barrier and query is rejected", async () => {
 	await expect(app.run()).rejects.toThrow("baseline unavailable");
 });
 
-test("known writes are serialized and awaited; queries cannot return older generations", async () => {
+test("queries await known writes and cannot return older generations", async () => {
 	const gate = Promise.withResolvers<void>();
+	const started = Promise.withResolvers<void>();
 	let acknowledged = false;
 	const app = harness(async (op) => {
-		if (op.paths?.length) { await gate.promise; acknowledged = true; }
+		if (op.paths?.length) { started.resolve(); await gate.promise; acknowledged = true; }
 		if (op.op === "diff") return { generation: 1 };
 		return { generation: acknowledged ? 2 : 1 };
 	});
 	await app.start();
 	const write = app.write("@./main.ts");
 	const query = app.run();
-	await Bun.sleep(10);
+	await started.promise;
 	expect(app.calls.some((call) => call.op === "diff")).toBe(false);
 	gate.resolve();
 	await write;
@@ -219,9 +221,58 @@ test("known writes are serialized and awaited; queries cannot return older gener
 	expect(app.calls.find((call) => call.paths?.length)?.paths).toEqual(["main.ts"]);
 });
 
-test("failed sync is visible on a successful write and requires full recovery before queries", async () => {
+test("overlapping writes synchronize in order before the next query", async () => {
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let generation = 1;
+	const app = harness(async (op) => {
+		if (op.paths?.[0] === "first.ts") { started.resolve(); await release.promise; }
+		if (op.paths?.length) generation++;
+		return { generation };
+	});
+	await app.start();
+	const first = app.write("first.ts");
+	await started.promise;
+	const second = app.write("second.ts");
+	const query = app.run();
+	expect(app.calls.filter((call) => call.paths?.length).map((call) => call.paths)).toEqual([["first.ts"]]);
+	release.resolve();
+	await Promise.all([first, second]);
+	expect((await query).details).toMatchObject({ generation: 3 });
+	expect(app.calls.filter((call) => call.paths?.length).map((call) => call.paths)).toEqual([["first.ts"], ["second.ts"]]);
+});
+
+test("an earlier query barrier cannot clear a later failed-write recovery requirement", async () => {
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let delay = false;
+	const app = harness(async (op) => {
+		if (op.op === "sync" && op.paths?.length === 0 && delay) {
+			delay = false;
+			started.resolve();
+			await release.promise;
+		}
+		return { error: op.paths?.length ? "update queue unavailable; retry the request" : null };
+	});
+	await app.start();
+	delay = true;
+	const earlier = app.run("call_graph", { action: "callers", symbol: "run" });
+	await started.promise;
+	// Resolve path normalization immediately so all runnable microtasks drain deterministically.
+	spyOn(fs, "realpath").mockImplementation(async (path) => String(path));
+	const write = app.write("main.ts");
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	release.resolve();
+	expect(await write).toMatchObject({ content: [{ text: expect.stringContaining("file write succeeded") }] });
+	await earlier;
+	const start = app.calls.length;
+	await app.run();
+	expect(app.calls.slice(start).map((call) => call.op)).toEqual(["rescan", "diff"]);
+});
+
+test.each(["read failed", ""])("failed sync is visible and requires recovery even with an empty error: %j", async (error) => {
 	let broken = true;
-	const app = harness((op) => ({ error: broken && op.paths?.length ? "read failed" : null }));
+	const app = harness((op) => ({ error: broken && op.paths?.length ? error : null }));
 	await app.start();
 	expect(await app.write("main.ts")).toMatchObject({ content: [{ text: expect.stringContaining("file write succeeded") }] });
 	broken = false;

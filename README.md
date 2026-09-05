@@ -51,7 +51,9 @@ stop any old owner before starting a new session: running owners do not reload e
 
 Startup reconciles saved files before capture; rescans read source bytes but reuse unchanged analysis.
 Successful `edit`/`write` results await path sync. Failed sync adds a warning without misreporting the
-file write as failed; the next graph query retries a full reconciliation. Bash/external writes remain
+file write as failed; the next graph query retries a full reconciliation. Syncs and rescans share
+one queue so older completions cannot clear newer failures; graph traversal stays concurrent.
+Bash/external writes remain
 eventually consistent: use `refresh: true` when freshness matters, even with a healthy watcher.
 
 Checkpoint identity and capture failures survive reload/resume in session metadata. Transient
