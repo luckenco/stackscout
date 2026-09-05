@@ -148,6 +148,15 @@ bun test tests/pi_extension.test.ts
 The Pi lifecycle tests use temporary source directories and a stub Pi API; they require Bun
 but no npm dependency installation. They do not exercise Pi's loader or Cargo integration.
 
+## Performance
+
+[Resolver benchmark results and methodology](docs/performance.md) cover the indexed
+lookup improvement. Run the manual scaling benchmark with:
+
+```sh
+cargo test --release resolve::bench::scaling -- --ignored --nocapture
+```
+
 ## License
 
 [MIT](LICENSE)
