@@ -9,6 +9,8 @@ Build and connect with the [README commands](../README.md#repository-service).
 
 Check JSON `error` even when the CLI exits successfully; transport/startup failures exit
 unsuccessfully. Rust `service::request` connects only; the CLI owns subprocess startup.
+The spawned owner inherits stderr: auto-starting wrappers that await pipe EOF (such as Node's
+`execFileSync`) must route stderr to a log/inherited stream instead of capturing it in a pipe.
 
 Set owner configuration before startup; reconnecting does not reconfigure it:
 

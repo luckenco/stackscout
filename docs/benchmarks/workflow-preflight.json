@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "provider": "openai-codex",
+  "model": "gpt-6-astra",
+  "thinking": "low",
+  "repetitions": 2,
+  "node": "v24.19.0",
+  "pi": "0.85.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "binary_sha256": "b80afb3034f2e4f5c76ad6f344511326fc36c267ca9586085b4e99d12b4b5b82",
+  "fixture_sha256": "6d9a7278bb20e9ee7ad8b589b7fb2179a2f9f70276be6d3bd6495144e5445522",
+  "prompts": {
+    "prepare": "Inspect checkout.ts and its dependencies to prepare a small change to quote. Read only for now; I will send implementation requirements next. Keep your response brief.",
+    "implement": "Implement quote(subtotal, weight, discount = 0): subtract a nonnegative discount from subtotal, floor the discounted subtotal at zero, then add the current shipping charge. Preserve the two-argument API. Only edit checkout.ts and report.json. Run node check.mjs and inspect your final patch against .baseline/checkout.ts.\nOther work may have landed since preparation. Identify any concurrent file changes that require adapting checkout.ts, without attributing unrelated changes to this task. As soon as you identify one, write report.json as {\"relevant\": [\"filename\"], \"reason\": \"brief evidence\"}; write {\"relevant\": [], \"reason\": \"...\"} at completion if none. Use source and tests to verify, not graph absence as proof.",
+    "guidance": "Use call_graph_review with files:[\"checkout.ts\"] and refresh:true to inspect relevant changes before implementing; drill down/read source as needed. Acknowledge only inspected evidence. Avoid a broad session diff when a narrow review answers the question."
+  },
+  "trials": [
+    {
+      "id": "0-single-control",
+      "repeat": 0,
+      "scenario": "single",
+      "graph": false,
+      "started_at": 1788617445095,
+      "reviewer_startup_ms": 138,
+      "prepared_at": 1788617461109,
+      "completed_at": 1788617502114,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5/0-single-control/repo/.baseline/checkout.ts\t2026-09-05 16:10:45\n+++ /tmp/ss-workflow-m5/0-single-control/repo/checkout.ts\t2026-09-05 16:11:19\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight);\n }\n",
+      "wall_ms": 57019,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 21862,
+          "input_tokens": 7204,
+          "cache_read_tokens": 13952,
+          "output_tokens": 706,
+          "tool_calls": 13,
+          "tool_output_bytes": 2957,
+          "followup_read_calls": 4,
+          "followup_bash_calls": 4,
+          "graph_calls": 0
+        },
+        "writer": {
+          "model_tokens": 0,
+          "input_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 0,
+          "tool_calls": 0,
+          "tool_output_bytes": 0,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": null
+    },
+    {
+      "id": "0-single-graph",
+      "repeat": 0,
+      "scenario": "single",
+      "graph": true,
+      "started_at": 1788617505261,
+      "error": "Error: spawnSync /Users/cal/Code/personal/stackscout/target/release/stackscout ETIMEDOUT",
+      "wall_ms": 30002,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 0,
+          "input_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 0,
+          "tool_calls": 0,
+          "tool_output_bytes": 0,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        },
+        "writer": {
+          "model_tokens": 0,
+          "input_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 0,
+          "tool_calls": 0,
+          "tool_output_bytes": 0,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": null
+    }
+  ]
+}

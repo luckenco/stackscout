@@ -104,12 +104,15 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 bun test tests/pi_extension.test.ts tests/pi_live.test.ts
+node --test scripts/workflow.test.mjs
 ```
 
 Live tests use real Node/Pi SDK processes with scripted model responses and watching disabled.
 They require Node and Pi on PATH (or `STACKSCOUT_PI_PACKAGE`); missing Pi explicitly skips them.
 Bundled Pi installs also need matching `@earendil-works/pi-ai` beside Pi. Service changes require
 Linux and macOS checks; use an init process in Docker. Unit lifecycle tests stub the Pi API.
-For manual measurements, see [performance](docs/performance.md).
+The workflow evaluator test needs Node with native TypeScript support (24 recommended), not
+model credentials. For service measurements and opt-in real-model trials, see
+[performance](docs/performance.md) and [evaluation](docs/evaluation.md).
 
 [MIT License](LICENSE)

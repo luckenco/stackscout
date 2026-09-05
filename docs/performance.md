@@ -82,3 +82,42 @@ failed-batch rollback, and two readers observing complete generations. The new p
 probe catches unwatched discovery drift after 30.08 / 30.10 seconds. Callback overflow and loss
 during recovery are deterministically injected in the existing watcher unit test; kernel-buffer
 overflow is not forced. Timing/retention runners are opt-in, not flaky CI timing assertions.
+
+## Workflow evaluation
+
+[Method and reproduction](evaluation.md). macOS, Pi 0.85.1, Node 24.19.0,
+`openai-codex/gpt-6-astra`, low thinking; real model responses in every agent.
+[Initial batch](benchmarks/workflow-initial.json): 12 attempts, 11 completed, one provider
+WebSocket failure retained (resume ran only unattempted trials). All completed patches passed
+seven external cases and source/patch review, with zero false/missed alerts or unexpected edits.
+The five complete pairs used **67–120% more total model tokens with graph tools**. The complete
+relevant pair reported detection after 14.25 seconds (control) / 15.75 seconds (graph).
+
+Traces showed unconditional adapter guidance causing extra session diffs, ceremonial acknowledgements,
+and repeated reads. Changed guidance to choose a concrete scoped/session-wide question and acknowledge
+only for a later review. [Follow-up](benchmarks/workflow-guided.json): three pairs, control first,
+all six completed with the same correctness/alert results. Counts below sum reviewer + writer tokens;
+reads count the reviewer's post-preparation `read` calls, not Bash inspection.
+
+| Scenario | Model tokens, control → graph | Follow-up reads, control → graph |
+| --- | ---: | ---: |
+| Single agent | 21,026 → 31,041 | 3 → 1 |
+| Relevant + unrelated writer edits | 21,844 → 39,198 | 3 → 3 |
+| Unrelated-only writer edit | 27,326 → 37,728 | 5 → 2 |
+
+The revised workflow used 1–2 reviewer graph calls and zero writer graph calls (initially 3–5
+and one, respectively), but still **38–79% more tokens**. Relevant-change detection was
+10.45 / 15.55 seconds; wall time improved in only one of three pairs. Shared second clients
+kept `files_parsed` at 11, establishing reuse, not token savings.
+
+**Usefulness gate remains unproven.** Fewer repeated reads are promising, but there is no token
+or detection benefit on this small explicit-import task. This synthetic pilot and small self-hosted
+service corpus do not establish representative large Rust/TS workflow performance. Evaluate selective
+tool exposure/context cost next; require stronger matched tasks before expanding product scope.
+
+[Compressed traces](benchmarks/workflow-events.jsonl.gz) retain 591 tool/text/usage events across
+cohorts; SDK thinking/signatures and auth journals are excluded. Summaries retain every final patch
+and settings; the initial adapter is `8fe00554`, while the follow-up records its adapter hash.
+A separate [preflight](benchmarks/workflow-preflight.json) retains two earlier attempts: one complete
+control, then a runner startup-pipe timeout. Fixed stderr routing before the primary batch; this
+incomplete preflight pair is excluded from paired deltas, not hidden as a successful trial.

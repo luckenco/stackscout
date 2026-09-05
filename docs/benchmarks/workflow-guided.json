@@ -1,0 +1,311 @@
+{
+  "schema": 1,
+  "provider": "openai-codex",
+  "model": "gpt-6-astra",
+  "thinking": "low",
+  "repetitions": 1,
+  "node": "v24.19.0",
+  "pi": "0.85.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "binary_sha256": "b80afb3034f2e4f5c76ad6f344511326fc36c267ca9586085b4e99d12b4b5b82",
+  "adapter_sha256": "2774fbfe21859017e00818d85341f012ad01db97c98cba2aa3070333a4da9dad",
+  "fixture_sha256": "6d9a7278bb20e9ee7ad8b589b7fb2179a2f9f70276be6d3bd6495144e5445522",
+  "prompts": {
+    "prepare": "Inspect checkout.ts and its dependencies to prepare a small change to quote. Read only for now; I will send implementation requirements next. Keep your response brief.",
+    "implement": "Implement quote(subtotal, weight, discount = 0): subtract a nonnegative discount from subtotal, floor the discounted subtotal at zero, then add the current shipping charge. Preserve the two-argument API. Only edit checkout.ts and report.json. Run node check.mjs and inspect your final patch against .baseline/checkout.ts.\nOther work may have landed since preparation. Identify any concurrent file changes that require adapting checkout.ts, without attributing unrelated changes to this task. As soon as you identify one, write report.json as {\"relevant\": [\"filename\"], \"reason\": \"brief evidence\"}; write {\"relevant\": [], \"reason\": \"...\"} at completion if none. Use source and tests to verify, not graph absence as proof.",
+    "guidance": "Use one call_graph_review with files:[\"checkout.ts\"] and refresh:true before implementing. Reuse still-applicable preparation reads and read changed dependencies from their source ranges. Advance the scope with call_graph_ack only if another review is needed. Use the final patch and tests for implementation verification."
+  },
+  "trials": [
+    {
+      "id": "0-single-control",
+      "repeat": 0,
+      "scenario": "single",
+      "graph": false,
+      "started_at": 1788619236343,
+      "reviewer_startup_ms": 157,
+      "prepared_at": 1788619265017,
+      "completed_at": 1788619309463,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5-guided/0-single-control/repo/.baseline/checkout.ts\t2026-09-05 16:40:36\n+++ /tmp/ss-workflow-m5-guided/0-single-control/repo/checkout.ts\t2026-09-05 16:41:27\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight);\n }\n",
+      "wall_ms": 73120,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 21026,
+          "input_tokens": 10741,
+          "cache_read_tokens": 9600,
+          "output_tokens": 685,
+          "tool_calls": 11,
+          "tool_output_bytes": 2697,
+          "followup_read_calls": 3,
+          "followup_bash_calls": 3,
+          "graph_calls": 0
+        },
+        "writer": {
+          "model_tokens": 0,
+          "input_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 0,
+          "tool_calls": 0,
+          "tool_output_bytes": 0,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": null
+    },
+    {
+      "id": "0-single-graph",
+      "repeat": 0,
+      "scenario": "single",
+      "graph": true,
+      "started_at": 1788619312637,
+      "reviewer_startup_ms": 170,
+      "prepared_at": 1788619335317,
+      "completed_at": 1788619382201,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5-guided/0-single-graph/repo/.baseline/checkout.ts\t2026-09-05 16:41:52\n+++ /tmp/ss-workflow-m5-guided/0-single-graph/repo/checkout.ts\t2026-09-05 16:42:41\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount: number = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight);\n }\n",
+      "wall_ms": 69564,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 31041,
+          "input_tokens": 11219,
+          "cache_read_tokens": 19200,
+          "output_tokens": 622,
+          "tool_calls": 10,
+          "tool_output_bytes": 3613,
+          "followup_read_calls": 1,
+          "followup_bash_calls": 2,
+          "graph_calls": 2
+        },
+        "writer": {
+          "model_tokens": 0,
+          "input_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 0,
+          "tool_calls": 0,
+          "tool_output_bytes": 0,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": null
+    },
+    {
+      "id": "0-relevant-control",
+      "repeat": 0,
+      "scenario": "relevant",
+      "graph": false,
+      "started_at": 1788619385374,
+      "reviewer_startup_ms": 163,
+      "prepared_at": 1788619403179,
+      "writer_startup_ms": 185,
+      "writer_complete_at": 1788619417887,
+      "completed_at": 1788619457351,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [
+        "shipping.ts"
+      ],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5-guided/0-relevant-control/repo/.baseline/checkout.ts\t2026-09-05 16:43:05\n+++ /tmp/ss-workflow-m5-guided/0-relevant-control/repo/checkout.ts\t2026-09-05 16:44:00\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight).cents;\n }\n",
+      "wall_ms": 71977,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 18045,
+          "input_tokens": 9785,
+          "cache_read_tokens": 7552,
+          "output_tokens": 708,
+          "tool_calls": 11,
+          "tool_output_bytes": 3194,
+          "followup_read_calls": 3,
+          "followup_bash_calls": 3,
+          "graph_calls": 0
+        },
+        "writer": {
+          "model_tokens": 3799,
+          "input_tokens": 3673,
+          "cache_read_tokens": 0,
+          "output_tokens": 126,
+          "tool_calls": 2,
+          "tool_output_bytes": 121,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": 10451
+    },
+    {
+      "id": "0-relevant-graph",
+      "repeat": 0,
+      "scenario": "relevant",
+      "graph": true,
+      "started_at": 1788619460566,
+      "reviewer_startup_ms": 197,
+      "prepared_at": 1788619480096,
+      "writer_startup_ms": 166,
+      "shared_files_parsed": 11,
+      "writer_complete_at": 1788619494265,
+      "completed_at": 1788619536320,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [
+        "shipping.ts"
+      ],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5-guided/0-relevant-graph/repo/.baseline/checkout.ts\t2026-09-05 16:44:20\n+++ /tmp/ss-workflow-m5-guided/0-relevant-graph/repo/checkout.ts\t2026-09-05 16:45:21\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight).cents;\n }\n",
+      "wall_ms": 75754,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 33574,
+          "input_tokens": 10489,
+          "cache_read_tokens": 22400,
+          "output_tokens": 685,
+          "tool_calls": 12,
+          "tool_output_bytes": 4997,
+          "followup_read_calls": 3,
+          "followup_bash_calls": 2,
+          "graph_calls": 2
+        },
+        "writer": {
+          "model_tokens": 5624,
+          "input_tokens": 3833,
+          "cache_read_tokens": 1664,
+          "output_tokens": 127,
+          "tool_calls": 2,
+          "tool_output_bytes": 121,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": 15552
+    },
+    {
+      "id": "0-unrelated-control",
+      "repeat": 0,
+      "scenario": "unrelated",
+      "graph": false,
+      "started_at": 1788619539472,
+      "reviewer_startup_ms": 160,
+      "prepared_at": 1788619555124,
+      "writer_startup_ms": 162,
+      "writer_complete_at": 1788619563707,
+      "completed_at": 1788619610271,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5-guided/0-unrelated-control/repo/.baseline/checkout.ts\t2026-09-05 16:45:39\n+++ /tmp/ss-workflow-m5-guided/0-unrelated-control/repo/checkout.ts\t2026-09-05 16:46:25\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight);\n }\n",
+      "wall_ms": 70799,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 24975,
+          "input_tokens": 10020,
+          "cache_read_tokens": 14208,
+          "output_tokens": 747,
+          "tool_calls": 14,
+          "tool_output_bytes": 4110,
+          "followup_read_calls": 5,
+          "followup_bash_calls": 4,
+          "graph_calls": 0
+        },
+        "writer": {
+          "model_tokens": 2351,
+          "input_tokens": 1265,
+          "cache_read_tokens": 1024,
+          "output_tokens": 62,
+          "tool_calls": 1,
+          "tool_output_bytes": 61,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 0,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": null
+    },
+    {
+      "id": "0-unrelated-graph",
+      "repeat": 0,
+      "scenario": "unrelated",
+      "graph": true,
+      "started_at": 1788619613419,
+      "reviewer_startup_ms": 165,
+      "prepared_at": 1788619630603,
+      "writer_startup_ms": 181,
+      "shared_files_parsed": 11,
+      "writer_complete_at": 1788619646013,
+      "completed_at": 1788619694571,
+      "acceptance": {
+        "passed": true,
+        "stdout": "7 acceptance cases passed\n",
+        "stderr": ""
+      },
+      "unexpected_files": [],
+      "alerts": [],
+      "false_alerts": [],
+      "missed_alerts": [],
+      "patch": "--- /tmp/ss-workflow-m5-guided/0-unrelated-graph/repo/.baseline/checkout.ts\t2026-09-05 16:46:53\n+++ /tmp/ss-workflow-m5-guided/0-unrelated-graph/repo/checkout.ts\t2026-09-05 16:47:46\n@@ -1,4 +1,4 @@\n import { shipping } from \"./shipping.ts\";\n-export function quote(subtotal: number, weight: number) {\n-  return subtotal + shipping(weight);\n+export function quote(subtotal: number, weight: number, discount = 0) {\n+  return Math.max(0, subtotal - Math.max(0, discount)) + shipping(weight);\n }\n",
+      "wall_ms": 81152,
+      "metrics": {
+        "reviewer": {
+          "model_tokens": 32256,
+          "input_tokens": 10532,
+          "cache_read_tokens": 20992,
+          "output_tokens": 732,
+          "tool_calls": 12,
+          "tool_output_bytes": 3891,
+          "followup_read_calls": 2,
+          "followup_bash_calls": 4,
+          "graph_calls": 1
+        },
+        "writer": {
+          "model_tokens": 5472,
+          "input_tokens": 3840,
+          "cache_read_tokens": 1536,
+          "output_tokens": 96,
+          "tool_calls": 2,
+          "tool_output_bytes": 174,
+          "followup_read_calls": 0,
+          "followup_bash_calls": 1,
+          "graph_calls": 0
+        }
+      },
+      "detection_ms": null
+    }
+  ]
+}
