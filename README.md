@@ -71,7 +71,7 @@ exceed the Pi tool's output limits.
 
 ## Experimental repository service
 
-The first service stage shares one index and immutable generations across clients:
+The Linux/macOS service shares one watched index and immutable generations across clients:
 
 ```sh
 stackscout request . '{"version":1,"op":"sync","paths":[]}'
@@ -82,10 +82,11 @@ stackscout request . '{"version":1,"op":"diff","name":"session"}'
 ```
 
 `request` connects or starts a background owner; `serve <root>` runs one in the foreground.
-Check the response's `error`, `instance`, generation, and completeness fields. Filesystem
-watching is **not implemented yet**: notify changed paths explicitly or request `rescan`.
-The Pi extension is not connected to this service. See [the protocol and remaining service
-milestone requirements](docs/service.md).
+Check the response's `error`, `instance`, generation, completeness, and watcher-health fields.
+Watching is eventually consistent; explicit path sync acknowledges writes without waiting for
+notifications. The service also provides bounded `callers`, `callees`, and `impact` queries,
+parallel indexing, and a private Unix socket fallback for long paths. The Pi extension is not
+connected to this service. See [the protocol and resource limits](docs/service.md).
 
 ## In-memory Rust API
 
@@ -112,9 +113,7 @@ the resident core; initial scans and explicit batches rebuild the graph once per
 
 StackScout is an early prototype. It does **not** currently:
 
-- watch filesystem changes or recover from watcher loss;
 - connect the bundled Pi extension to the resident service;
-- expose callers/callees/impact queries through the service;
 - provide a non-Unix service transport;
 - automatically coordinate coding-agent sessions;
 - provide VCS revision lookup;
