@@ -88,6 +88,7 @@ pub(crate) fn compare(before: &graph::Graph, after: &graph::Graph, scope: &Scope
                 language,
                 file: file.clone(),
                 qualified_name: Vec::new(),
+                conditions: Vec::new(),
             };
             let mut found = false;
             for key in graph

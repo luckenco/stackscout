@@ -44,17 +44,24 @@ pub(crate) struct SymbolKey {
     pub(crate) language: Language,
     pub(crate) file: String,
     pub(crate) qualified_name: Vec<String>,
+    /// Unevaluated Rust cfg attributes distinguish alternative definitions.
+    pub(crate) conditions: Vec<String>,
+}
+
+impl SymbolKey {
+    pub(crate) fn name(&self) -> String {
+        self.conditions
+            .iter()
+            .chain(&self.qualified_name)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("::")
+    }
 }
 
 impl fmt::Display for SymbolKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}::{}",
-            self.language,
-            self.file,
-            self.qualified_name.join("::")
-        )
+        write!(f, "{}:{}::{}", self.language, self.file, self.name())
     }
 }
 
@@ -84,6 +91,8 @@ pub(crate) enum CallTarget {
     Constructor(Vec<String>),
     /// A bare call shadowed by a parameter or local binding.
     Bound(String),
+    /// An unexpanded/deferred body or unsupported callee, retained without guessing edges.
+    Opaque(String),
 }
 
 impl fmt::Display for CallTarget {
@@ -95,7 +104,7 @@ impl fmt::Display for CallTarget {
             Self::SelfAssociated(name) => write!(f, "Self::{name}"),
             Self::Path(path) | Self::Method(path) => f.write_str(&path.join("::")),
             Self::Constructor(path) => write!(f, "new {}", path.join(".")),
-            Self::Bound(name) => f.write_str(name),
+            Self::Bound(name) | Self::Opaque(name) => f.write_str(name),
         }
     }
 }

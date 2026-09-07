@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use tree_sitter::Node;
 
 use super::{AnalyzeError, compact, first_named, range, shape, text};
@@ -20,7 +23,7 @@ pub(super) fn extract(
         exports: Vec::new(),
     };
     imports(path, source, root, &[], root, &mut artifact.rust_imports)?;
-    definitions(path, source, root, &[], None, &mut artifact)?;
+    definitions(path, source, root, &[], &[], &[], &mut artifact)?;
     Ok(artifact)
 }
 
@@ -97,7 +100,7 @@ fn use_tree(
                 parts.pop();
             }
             let local = if let Some(alias) = node.child_by_field_name("alias") {
-                text(path, source, alias)?.to_owned()
+                spelling(path, source, alias)?
             } else {
                 parts.last().cloned().unwrap_or_default()
             };
@@ -122,7 +125,7 @@ fn use_tree(
 }
 
 fn use_path(path: &str, source: &str, node: Node<'_>) -> Result<Vec<String>, AnalyzeError> {
-    if node.kind() == "scoped_identifier" {
+    if matches!(node.kind(), "scoped_identifier" | "scoped_type_identifier") {
         let mut parts = if let Some(parent) = node.child_by_field_name("path") {
             use_path(path, source, parent)?
         } else {
@@ -131,7 +134,82 @@ fn use_path(path: &str, source: &str, node: Node<'_>) -> Result<Vec<String>, Ana
         parts.push(required_field(path, source, node, "name")?.to_owned());
         return Ok(parts);
     }
-    Ok(vec![text(path, source, node)?.to_owned()])
+    if node.kind() == "generic_type"
+        && let (Some(base), Some(arguments)) = (
+            node.child_by_field_name("type"),
+            node.child_by_field_name("type_arguments"),
+        )
+    {
+        let mut parts = use_path(path, source, base)?;
+        parts
+            .last_mut()
+            .expect("type path has a name")
+            .push_str(&spelling(path, source, arguments)?);
+        return Ok(parts);
+    }
+    Ok(vec![spelling(path, source, node)?])
+}
+
+// Token spelling, not whitespace deletion: literals retain their contents and
+// adjacent words (notably `as` in UFCS) must remain separate tokens.
+fn spelling(path: &str, source: &str, node: Node<'_>) -> Result<String, AnalyzeError> {
+    fn visit(
+        path: &str,
+        source: &str,
+        node: Node<'_>,
+        output: &mut String,
+    ) -> Result<(), AnalyzeError> {
+        if matches!(node.kind(), "line_comment" | "block_comment") {
+            return Ok(());
+        }
+        if node.child_count() == 0 || node.kind().ends_with("_literal") {
+            let token = text(path, source, node)?;
+            let token = if matches!(
+                node.kind(),
+                "identifier" | "type_identifier" | "field_identifier"
+            ) {
+                token.strip_prefix("r#").unwrap_or(token)
+            } else {
+                token
+            };
+            let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+            if output.ends_with(word) && token.starts_with(word) {
+                output.push(' ');
+            }
+            output.push_str(token);
+            return Ok(());
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            visit(path, source, child, output)?;
+        }
+        Ok(())
+    }
+    let mut output = String::new();
+    visit(path, source, node, &mut output)?;
+    Ok(output)
+}
+
+fn conditions(path: &str, source: &str, node: Node<'_>) -> Result<Vec<String>, AnalyzeError> {
+    let mut conditions = Vec::new();
+    let mut previous = node.prev_named_sibling();
+    while let Some(attribute) = previous {
+        if !matches!(
+            attribute.kind(),
+            "attribute_item" | "line_comment" | "block_comment"
+        ) {
+            break;
+        }
+        if attribute.kind() == "attribute_item" {
+            let value = spelling(path, source, attribute)?;
+            if value.starts_with("#[cfg(") || value.starts_with("#[cfg_attr(") {
+                conditions.push(value);
+            }
+        }
+        previous = attribute.prev_named_sibling();
+    }
+    conditions.reverse();
+    Ok(conditions)
 }
 
 fn definitions(
@@ -139,11 +217,28 @@ fn definitions(
     source: &str,
     node: Node<'_>,
     modules: &[String],
-    impl_name: Option<&str>,
+    owner: &[String],
+    inherited_conditions: &[String],
     artifact: &mut FileArtifact,
 ) -> Result<(), AnalyzeError> {
+    let mut conditions = inherited_conditions.to_vec();
+    conditions.extend(self::conditions(path, source, node)?);
     match node.kind() {
-        "trait_item" => return Ok(()),
+        "trait_item" => {
+            let name = required_field(path, source, node, "name")?;
+            if let Some(body) = node.child_by_field_name("body") {
+                definitions(
+                    path,
+                    source,
+                    body,
+                    modules,
+                    &[format!("<trait {name}>")],
+                    &conditions,
+                    artifact,
+                )?;
+            }
+            return Ok(());
+        }
         "function_item" => {
             let name = required_field(path, source, node, "name")?;
             let body =
@@ -153,15 +248,14 @@ fn definitions(
                         message: format!("function {name} has no body"),
                     })?;
             let mut qualified_name = modules.to_vec();
-            if let Some(name) = impl_name {
-                qualified_name.push(name.to_owned());
-            }
+            qualified_name.extend_from_slice(owner);
             qualified_name.push(name.to_owned());
             artifact.symbols.push(LocalSymbol {
                 key: SymbolKey {
                     language: Language::Rust,
                     file: path.to_owned(),
                     qualified_name,
+                    conditions,
                 },
                 module: modules.to_vec(),
                 location: range(node),
@@ -182,17 +276,17 @@ fn definitions(
                         path: path.to_owned(),
                         message: "impl has no type".to_owned(),
                     })?;
-            let type_name = text(path, source, type_node)?.trim();
-            let impl_name = if let Some(trait_node) = node.child_by_field_name("trait") {
-                let trait_name = text(path, source, trait_node)?.trim();
-                format!("<{type_name} as {trait_name}>")
+            let owner = if let Some(trait_node) = node.child_by_field_name("trait") {
+                let type_name = spelling(path, source, type_node)?;
+                let trait_name = spelling(path, source, trait_node)?;
+                vec![format!("<{type_name} as {trait_name}>")]
             } else {
-                type_name.to_owned()
+                use_path(path, source, type_node)?
             };
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    definitions(path, source, child, modules, Some(&impl_name), artifact)?;
+                    definitions(path, source, child, modules, &owner, &conditions, artifact)?;
                 }
             }
             return Ok(());
@@ -203,10 +297,10 @@ fn definitions(
                 node.child_by_field_name("body"),
             ) {
                 let mut nested = modules.to_vec();
-                nested.push(text(path, source, name)?.to_owned());
+                nested.push(spelling(path, source, name)?);
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    definitions(path, source, child, &nested, impl_name, artifact)?;
+                    definitions(path, source, child, &nested, owner, &conditions, artifact)?;
                 }
                 return Ok(());
             }
@@ -216,7 +310,7 @@ fn definitions(
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        definitions(path, source, child, modules, impl_name, artifact)?;
+        definitions(path, source, child, modules, owner, &conditions, artifact)?;
     }
     Ok(())
 }
@@ -233,10 +327,24 @@ fn collect_steps(
     node: Node<'_>,
     output: &mut Vec<LocalStep>,
 ) -> Result<(), AnalyzeError> {
-    if matches!(
-        node.kind(),
-        "function_item" | "closure_expression" | "impl_item" | "mod_item"
-    ) {
+    let boundary = match node.kind() {
+        "closure_expression" => Some("closure body omitted".to_owned()),
+        "async_block" => Some("async body deferred".to_owned()),
+        "function_item" | "impl_item" | "mod_item" => Some(format!(
+            "nested {} body omitted",
+            node.kind().trim_end_matches("_item")
+        )),
+        "macro_invocation" => Some(format!(
+            "macro {}! unexpanded",
+            required_field(path, source, node, "macro")?
+        )),
+        _ => None,
+    };
+    if let Some(boundary) = boundary {
+        output.push(LocalStep::Call(CallSite {
+            target: CallTarget::Opaque(format!("[{boundary}]")),
+            location: range(node),
+        }));
         return Ok(());
     }
     if node.kind() == "if_expression" {
@@ -379,16 +487,23 @@ fn call_target(
     source: &str,
     mut node: Node<'_>,
 ) -> Result<Option<CallTarget>, AnalyzeError> {
-    if node.kind() == "generic_function" {
-        node = node.child_by_field_name("function").unwrap_or(node);
+    loop {
+        let inner = match node.kind() {
+            "generic_function" => node.child_by_field_name("function"),
+            "parenthesized_expression" => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+            }
+            _ => None,
+        };
+        let Some(inner) = inner else { break };
+        node = inner;
     }
     match node.kind() {
-        "identifier" => Ok(Some(CallTarget::Bare(text(path, source, node)?.to_owned()))),
+        "identifier" => Ok(Some(CallTarget::Bare(spelling(path, source, node)?))),
         "scoped_identifier" => {
-            let parts = text(path, source, node)?
-                .split("::")
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
+            let parts = use_path(path, source, node)?;
             if parts.len() == 2 && parts[0] == "Self" {
                 return Ok(Some(CallTarget::SelfAssociated(parts[1].clone())));
             }
@@ -401,7 +516,7 @@ fn call_target(
             let Some(field) = node.child_by_field_name("field") else {
                 return Ok(None);
             };
-            let field = text(path, source, field)?.to_owned();
+            let field = spelling(path, source, field)?;
             if text(path, source, value)? == "self" {
                 return Ok(Some(CallTarget::SelfMethod(field)));
             }
@@ -409,7 +524,10 @@ fn call_target(
             parts.push(field);
             Ok(Some(CallTarget::Method(parts)))
         }
-        _ => Ok(None),
+        _ => Ok(Some(CallTarget::Opaque(format!(
+            "[callee {}]",
+            text(path, source, node)?
+        )))),
     }
 }
 
@@ -428,7 +546,7 @@ fn bound(
             }
             if type_path
                 && let Some(owner) = node.parent().and_then(|body| body.parent())
-                && owner.kind() == "impl_item"
+                && matches!(owner.kind(), "impl_item" | "trait_item")
                 && type_binds(path, source, owner, name)?
             {
                 return Ok(true);
@@ -550,7 +668,8 @@ fn pattern_binds(
     name: &str,
 ) -> Result<bool, AnalyzeError> {
     if matches!(node.kind(), "identifier" | "shorthand_field_identifier") {
-        return Ok(text(path, source, node)? == name);
+        let value = text(path, source, node)?;
+        return Ok(value.strip_prefix("r#").unwrap_or(value) == name);
     }
     if matches!(
         node.kind(),
@@ -599,7 +718,55 @@ fn required_field<'a>(
             path: path.to_owned(),
             message: format!("{} has no {field}", node.kind()),
         })?;
-    text(path, source, child)
+    let value = text(path, source, child)?;
+    Ok(value.strip_prefix("r#").unwrap_or(value))
+}
+
+// tree-sitter-rust 0.24 treats the stable `safe` foreign-item modifier as an
+// ERROR token. Accept only that token in an otherwise checked unsafe extern
+// declaration; other parser errors still invalidate the file.
+pub(super) fn safe_foreign(node: Node<'_>, source: &str) -> bool {
+    if !node.is_error() || node.utf8_text(source.as_bytes()) != Ok("safe") {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let declaration = if parent.kind() == "declaration_list" {
+        let Some(next) = node.next_named_sibling() else {
+            return false;
+        };
+        if !next
+            .child(0)
+            .is_some_and(|first| matches!(first.kind(), "fn" | "static"))
+        {
+            return false;
+        }
+        next
+    } else {
+        if !node
+            .next_sibling()
+            .is_some_and(|next| matches!(next.kind(), "fn" | "static"))
+        {
+            return false;
+        }
+        parent
+    };
+    if !matches!(
+        declaration.kind(),
+        "function_signature_item" | "static_item"
+    ) {
+        return false;
+    }
+    declaration
+        .parent()
+        .and_then(|list| list.parent())
+        .is_some_and(|foreign| {
+            foreign.kind() == "foreign_mod_item"
+                && foreign
+                    .child(0)
+                    .is_some_and(|first| first.kind() == "unsafe")
+        })
 }
 
 fn has_child(node: Node<'_>, kind: &str) -> bool {

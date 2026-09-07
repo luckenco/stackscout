@@ -69,6 +69,7 @@ pub(crate) fn select<'a>(
             language,
             file: file.to_owned(),
             qualified_name: Vec::new(),
+            conditions: Vec::new(),
         };
         // Scope components (e.g. Rust impl types) may themselves contain `::`.
         Box::new(
@@ -89,7 +90,7 @@ pub(crate) fn select<'a>(
             );
         }
         if (!qualified && key.qualified_name.last().is_some_and(|last| last == name))
-            || key.qualified_name.join("::") == name
+            || key.name() == name
         {
             if found.is_some() {
                 return Err("ambiguous symbol; use language:file::qualified::name".to_owned());
@@ -376,6 +377,43 @@ mod tests {
         assert!(output.truncated);
         assert!(!output.calls.is_empty());
         assert!(serde_json::to_vec(&output).unwrap().len() <= 48 * 1024);
+    }
+
+    #[test]
+    fn conditional_definitions_have_selectable_ids_and_ambiguous_incoming_edges() {
+        let mut repo = Repository::new().unwrap();
+        repo.change(
+            "lib.rs",
+            b"#[cfg(unix)] fn work() {} #[cfg(not(unix))] fn work() {} fn run() { work(); }",
+        )
+        .unwrap();
+        let snapshot = repo.snapshot();
+        assert!(
+            select(&snapshot.graph, "work")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        for key in snapshot
+            .graph
+            .symbols
+            .keys()
+            .filter(|key| !key.conditions.is_empty())
+        {
+            assert_eq!(select(&snapshot.graph, &key.to_string()).unwrap(), key);
+            let output = run(
+                &snapshot.graph,
+                Request {
+                    symbol: key.to_string(),
+                    depth: Some(1),
+                    limit: None,
+                },
+                Direction::Callers,
+            )
+            .unwrap();
+            assert_eq!(output.calls.len(), 1);
+            assert_eq!(output.calls[0].resolution, "ambiguous");
+            assert_eq!(output.calls[0].caller, "rust:lib.rs::run");
+        }
     }
 
     #[test]

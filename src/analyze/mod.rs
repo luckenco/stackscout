@@ -53,7 +53,7 @@ pub(crate) struct Directory {
 }
 
 // Bump when extraction semantics change. Parser mode distinguishes TS from TSX.
-pub(crate) const VERSION: u32 = 3;
+pub(crate) const VERSION: u32 = 4;
 
 pub(crate) struct Analyzers {
     rust: Parser,
@@ -139,7 +139,10 @@ fn parser(name: &'static str, language: tree_sitter::Language) -> Result<Parser,
 }
 
 fn first_error<'tree>(node: Node<'tree>, source: &str, language: Language) -> Option<Node<'tree>> {
-    if (node.is_error() || node.is_missing()) && !known_typescript_error(node, source, language) {
+    if (node.is_error() || node.is_missing())
+        && !known_typescript_error(node, source, language)
+        && !(language == Language::Rust && rust::safe_foreign(node, source))
+    {
         return Some(node);
     }
     let mut cursor = node.walk();

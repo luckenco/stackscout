@@ -11,17 +11,27 @@ pub(super) fn resolve(
     symbols: &super::Index<'_>,
 ) -> Resolution {
     let mut candidates = BTreeSet::new();
+    let associated;
     let path = match target {
         CallTarget::Bare(name) => std::slice::from_ref(name),
         CallTarget::Path(path) => path,
         CallTarget::SelfMethod(name) | CallTarget::SelfAssociated(name) => {
-            let mut path =
-                caller.key.qualified_name[..caller.key.qualified_name.len() - 1].to_vec();
-            path.push(name.clone());
-            super::same_file(&caller.key, &path, symbols, &mut candidates);
-            return super::resolution(target, candidates);
+            let owner = &caller.key.qualified_name
+                [caller.module.len()..caller.key.qualified_name.len() - 1];
+            // Lexical trait ownership does not establish Rust's dispatch precedence.
+            if owner.is_empty() || owner[0].starts_with('<') {
+                return Resolution::Uncertain(target.clone());
+            }
+            associated = owner
+                .iter()
+                .cloned()
+                .chain([name.clone()])
+                .collect::<Vec<_>>();
+            &associated
         }
-        CallTarget::Bound(_) => return Resolution::Uncertain(target.clone()),
+        CallTarget::Bound(_) | CallTarget::Opaque(_) => {
+            return Resolution::Uncertain(target.clone());
+        }
         _ => return Resolution::Unresolved(target.clone()),
     };
     let mut caller_module = module(&caller.key.file);

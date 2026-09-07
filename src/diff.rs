@@ -369,7 +369,12 @@ fn expand_steps<'a>(
                     output.push(TreeNode {
                         fingerprint: None,
                         identity: call.resolution.identity(),
-                        label: format!("[uncertain: {target} is locally bound]"),
+                        label: match target {
+                            crate::model::CallTarget::Bound(_) => {
+                                format!("[uncertain: {target} is locally bound]")
+                            }
+                            _ => format!("[uncertain: {target}]"),
+                        },
                         location_file: Some(file.to_owned()),
                         definition_location: None,
                         call_site_location: Some(call.location.clone()),

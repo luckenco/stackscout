@@ -420,6 +420,7 @@ fn add_function(
             language: Language::TypeScript,
             file: path.to_owned(),
             qualified_name,
+            conditions: Vec::new(),
         },
         module: Vec::new(),
         location: range(node),

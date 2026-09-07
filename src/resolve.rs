@@ -160,7 +160,9 @@ fn target(
                 }
             }
         }
-        CallTarget::Bound(_) => return Resolution::Uncertain(target.clone()),
+        CallTarget::Bound(_) | CallTarget::Opaque(_) => {
+            return Resolution::Uncertain(target.clone());
+        }
         CallTarget::Method(_) => return Resolution::Unresolved(target.clone()),
         CallTarget::ThisMethod(name)
         | CallTarget::SelfMethod(name)
