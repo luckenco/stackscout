@@ -9,10 +9,15 @@ use serde_json::{Value, json};
 
 struct Owner(Option<Child>);
 
+fn binary() -> std::ffi::OsString {
+    std::env::var_os("STACKSCOUT_MEASURE_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_stackscout").into())
+}
+
 impl Owner {
     fn start(root: &Path) -> Self {
         Self(Some(
-            Command::new(env!("CARGO_BIN_EXE_stackscout"))
+            Command::new(binary())
                 .arg("serve")
                 .arg(root)
                 .env("STACKSCOUT_WATCH", "0")
@@ -146,6 +151,142 @@ fn rss(owner: &Owner) -> u64 {
         * 1024
 }
 
+// Generated independently of the self-hosted corpus: same input for any measured binary.
+fn diff_costs(root: &Path) -> Vec<Value> {
+    let mut output = Vec::new();
+    for name in [
+        "rust-dense",
+        "ts-dense",
+        "diamond",
+        "failure-persistent",
+        "failure-introduced",
+    ] {
+        let workspace = root.join(name);
+        fs::create_dir(&workspace).unwrap();
+        let mut sources = Vec::new();
+        if name == "diamond" {
+            let mut source = String::from("export function run() { a0(); b0(); }\n");
+            for level in 0..10 {
+                let mut calls = format!("a{}(); b{}();", level + 1, level + 1);
+                if level == 9 {
+                    calls = "before_call();".to_owned();
+                }
+                source.push_str(&format!(
+                    "function a{level}() {{ {calls} }}\nfunction b{level}() {{ {calls} }}\n"
+                ));
+            }
+            sources.push(("api.ts".to_owned(), source));
+        } else {
+            let (keyword, public, extension) = match name {
+                "rust-dense" => ("fn", "pub ", "rs"),
+                _ => ("function", "export ", "ts"),
+            };
+            for file in 0..1000 {
+                let mut source = String::new();
+                for node in 0..10 {
+                    let visibility = if node == 0 { public } else { "" };
+                    let mut target = format!("f{file}_{}", node + 1);
+                    if node == 9 {
+                        target = "before_call".to_owned();
+                    }
+                    source.push_str(&format!(
+                        "{visibility}{keyword} f{file}_{node}() {{\n  {target}();\n}}\n"
+                    ));
+                }
+                sources.push((format!("f{file}.{extension}"), source));
+            }
+        }
+        if name.starts_with("failure-") {
+            let mut source = "export function broken() {}";
+            if name == "failure-persistent" {
+                source = "export function broken(";
+            }
+            sources.push(("broken.ts".to_owned(), source.to_owned()));
+        }
+        let mut hash = blake3::Hasher::new();
+        for (path, source) in &sources {
+            fs::write(workspace.join(path), source).unwrap();
+            hash.update(path.as_bytes());
+            hash.update(source.as_bytes());
+        }
+        let mut index = 0;
+        if name == "failure-introduced" {
+            index = sources.len() - 1;
+        }
+        let (path, before) = &sources[index];
+        let mut after = before.replace("before_call", "after_call");
+        if name == "failure-introduced" {
+            after = "export function broken(".to_owned();
+        }
+        let mut owner = Owner::start(&workspace);
+        ready(&workspace);
+        request(&workspace, json!({"op": "checkpoint", "name": "before"}));
+        fs::write(workspace.join(path), &after).unwrap();
+        let state = request(&workspace, json!({"op": "sync", "paths": [path]}));
+        assert_eq!(state["files_parsed"], sources.len() + 1);
+        request(&workspace, json!({"op": "checkpoint", "name": "same"}));
+        let diff = json!({"op": "diff", "name": "before"});
+        let evidence = request(&workspace, diff.clone());
+        let mut expected = "after_call";
+        if name == "failure-introduced" {
+            expected = "broken.ts";
+        }
+        assert!(evidence["diff"].as_str().unwrap().contains(expected));
+        for _ in 0..5 {
+            request(&workspace, diff.clone());
+        }
+        let changed = measure(30, |_| {
+            request(&workspace, diff.clone());
+        });
+        let unchanged = measure(30, |_| {
+            assert_eq!(
+                request(&workspace, json!({"op": "diff", "name": "same"}))["diff"],
+                ""
+            );
+        });
+        let review = json!({"op": "review", "name": "measure", "baseline": "before",
+            "baseline_generation": 1, "scope": {"files": [path]}});
+        let review_evidence = request(&workspace, review.clone());
+        for _ in 0..5 {
+            request(&workspace, review.clone());
+        }
+        let reviews = measure(30, |_| {
+            request(&workspace, review.clone());
+        });
+        assert_eq!(
+            request(&workspace, json!({"op": "status"}))["files_parsed"],
+            state["files_parsed"]
+        );
+        let mut updates = Vec::new();
+        let mut fresh = Vec::new();
+        for index in 0..30 {
+            let start = Instant::now();
+            let source = if index % 2 == 0 { before } else { &after };
+            fs::write(workspace.join(path), source).unwrap();
+            let result = request(&workspace, json!({"op": "sync", "paths": [path]}));
+            assert_eq!(result["generation"], index + 3);
+            assert_eq!(result["files_parsed"], sources.len() + index + 2);
+            updates.push(start.elapsed().as_secs_f64() * 1000.0);
+            if index % 2 == 1 {
+                // A new generation number forces a cache miss despite identical source text.
+                let start = Instant::now();
+                let result = request(&workspace, diff.clone());
+                fresh.push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(result["diff"], evidence["diff"]);
+                assert_eq!(result["truncated"], evidence["truncated"]);
+            }
+        }
+        let resident = rss(&owner);
+        let peak = owner.stop();
+        output.push(json!({"name": name, "files": sources.len(), "source_blake3": hash.finalize().to_hex().to_string(),
+            "diff_blake3": blake3::hash(evidence["diff"].as_str().unwrap().as_bytes()).to_hex().to_string(),
+            "review_blake3": blake3::hash(&serde_json::to_vec(&review_evidence["review"]).unwrap()).to_hex().to_string(),
+            "review_ms": reviews, "truncated": evidence["truncated"], "diff_ms": changed, "same_generation_ms": unchanged,
+            "fresh_diff_ms": summary(fresh), "write_sync_ms": summary(updates), "rss_bytes": resident, "peak_rss_bytes": peak}));
+    }
+    output
+}
+
 #[test]
 #[ignore = "manual release measurement; see docs/performance.md"]
 fn service_costs() {
@@ -188,7 +329,7 @@ fn service_costs() {
         request(&root, json!({"op": "status"}));
     });
     let second_client = measure(30, |_| {
-        let output = Command::new(env!("CARGO_BIN_EXE_stackscout"))
+        let output = Command::new(binary())
             .arg("request")
             .arg(&root)
             .arg(r#"{"version":1,"op":"status"}"#)
@@ -298,7 +439,10 @@ fn service_costs() {
             "diff_bytes": diff["diff"].as_str().unwrap().len(), "diff_truncated": diff["truncated"]}));
         service.stop();
     }
+    let diff_workloads = diff_costs(&root);
     let report = json!({"schema": 1, "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+        "binary_blake3": blake3::hash(&fs::read(binary()).unwrap()).to_hex().to_string(),
+        "diff_workloads": diff_workloads,
         "rustc": String::from_utf8(Command::new("rustc").arg("--version").output().unwrap().stdout).unwrap().trim(),
         "workload": {"name": "StackScout src (including inline tests)", "files": files, "bytes": bytes,
             "blake3": hash.finalize().to_hex().to_string(), "threads": 4, "watching": false},
