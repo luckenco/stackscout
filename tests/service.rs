@@ -146,7 +146,7 @@ fn watcher_reconciles_atomic_saves_directories_ignores_and_unchanged_hashes() {
 }
 
 #[test]
-#[ignore = "manual 30-second watcher drift probe; see docs/performance.md"]
+#[ignore = "manual 30-second watcher drift probe; see docs/service.md"]
 fn periodic_reconciliation_catches_unwatched_ignore_changes() {
     let mut workspace = Workspace::new();
     workspace.watching = true;

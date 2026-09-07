@@ -288,7 +288,7 @@ fn diff_costs(root: &Path) -> Vec<Value> {
 }
 
 #[test]
-#[ignore = "manual release measurement; see docs/performance.md"]
+#[ignore = "manual release measurement; set STACKSCOUT_MEASURE_OUT to a JSON output path"]
 fn service_costs() {
     if cfg!(debug_assertions) {
         panic!("use cargo test --release");

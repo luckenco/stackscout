@@ -1,4 +1,4 @@
-// Real-model, paired Pi trials. Opt-in: uses configured provider credentials; see docs/evaluation.md.
+// Opt-in real-model Pi trials: spends configured provider quota and runs model-chosen commands without a sandbox.
 import assert from "node:assert/strict";
 import { fork, execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
