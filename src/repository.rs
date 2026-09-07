@@ -238,6 +238,10 @@ impl Snapshot {
         diagnostics: bool,
         locations: bool,
     ) -> Result<String, Error> {
+        let unchanged = Arc::ptr_eq(&self.graph, &after.graph);
+        if unchanged && !diagnostics {
+            return Ok(String::new());
+        }
         let before_issues = self
             .files
             .values()
@@ -253,6 +257,16 @@ impl Snapshot {
             .chain(&after_issues)
             .map(|issue| issue.path.clone())
             .collect::<BTreeSet<_>>();
+        // Identical publications need no graph walk, but unchanged diagnostics still matter.
+        if unchanged {
+            return Ok(crate::render_issues(
+                &before_issues,
+                &after_issues,
+                &omitted,
+                String::new(),
+                diagnostics,
+            ));
+        }
         if omitted.is_empty() {
             return Ok(render::render_with_locations(
                 &diff::compare(&self.graph, &after.graph),
