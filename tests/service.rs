@@ -465,6 +465,14 @@ fn parse_counts_exclude_cache_hits_but_include_syntax_failures_and_rolled_back_w
 }
 
 #[test]
+#[ignore = "manual startup stress; see docs/service.md"]
+fn startup_stress() {
+    for _ in 0..100 {
+        startup_racers_share_one_owner_and_crash_recovery_does_not_restore_checkpoints();
+    }
+}
+
+#[test]
 fn startup_racers_share_one_owner_and_crash_recovery_does_not_restore_checkpoints() {
     let mut workspace = Workspace::new();
     fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();
@@ -478,7 +486,7 @@ fn startup_racers_share_one_owner_and_crash_recovery_does_not_restore_checkpoint
                 .arg(root)
                 .arg(r#"{"version":1,"op":"sync","paths":[]}"#)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap(),
         );

@@ -52,6 +52,33 @@ fn private_directory(path: &Path, create: bool) -> io::Result<()> {
     Ok(())
 }
 
+// Caller holds the workspace owner lock. A per-endpoint sibling also keeps fallback
+// workspaces independent and stays within the final socket's path-length budget.
+fn listen(socket: &Path) -> io::Result<UnixListener> {
+    let pending = socket.with_extension("tmp");
+    for path in [socket, &pending] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() && metadata.uid() == uid() => {
+                fs::remove_file(path)?;
+            }
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "refusing to remove a non-socket or unowned service endpoint",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let listener = UnixListener::bind(&pending)?;
+    fs::set_permissions(&pending, fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    // Clients see absence until the fully permissioned socket is atomically published.
+    // Do not change the process-wide umask: serve() can run in a multithreaded host.
+    fs::rename(&pending, socket)?;
+    Ok(listener)
+}
+
 /// Runs one foreground Linux/macOS service for a canonical workspace root until terminated.
 ///
 /// An OS file lock at the root protects ownership, including when a long socket path uses
@@ -84,18 +111,6 @@ pub fn serve(root: &Path) -> io::Result<()> {
         ),
         fs::TryLockError::Error(error) => error,
     })?;
-    match fs::symlink_metadata(&socket) {
-        Ok(metadata) if metadata.file_type().is_socket() && metadata.uid() == uid() => {
-            fs::remove_file(&socket)?
-        }
-        Ok(_) => {
-            return Err(io::Error::other(
-                "refusing to remove a non-socket or unowned service endpoint",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
     let threads = match std::env::var("STACKSCOUT_INDEX_THREADS") {
         Ok(value) => value
             .parse::<usize>()
@@ -112,9 +127,7 @@ pub fn serve(root: &Path) -> io::Result<()> {
         .build()
         .map_err(io::Error::other)?;
     let watch_enabled = std::env::var("STACKSCOUT_WATCH").as_deref() != Ok("0");
-    let listener = UnixListener::bind(&socket)?;
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
+    let listener = listen(&socket)?;
     let shared = Shared {
         root,
         instance: format!(
@@ -359,4 +372,64 @@ pub fn request(root: &Path, json: &str) -> io::Result<String> {
         ));
     }
     String::from_utf8(bytes).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_recovers_staged_sockets_and_accepts_on_the_final_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("service.sock");
+        let pending = socket.with_extension("tmp");
+        // Simulate crashes both before and after publication; a different root's sibling
+        // must not be removed, even when fallback endpoints share one directory.
+        drop(UnixListener::bind(&socket).unwrap());
+        drop(UnixListener::bind(&pending).unwrap());
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o777)).unwrap();
+        let other = directory.path().join("other.tmp");
+        fs::write(&other, "keep").unwrap();
+        let listener = listen(&socket).unwrap();
+        assert!(!pending.exists());
+        let metadata = fs::symlink_metadata(&socket).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), uid());
+        assert_eq!(fs::read_to_string(other).unwrap(), "keep");
+        let _client = UnixStream::connect(&socket).unwrap();
+        assert!(listener.accept().is_ok());
+    }
+
+    #[test]
+    fn publication_refuses_non_sockets_and_symlinks_at_either_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("service.sock");
+        let target = directory.path().join("keep");
+        fs::write(&target, "keep").unwrap();
+        for path in [socket.clone(), socket.with_extension("tmp")] {
+            fs::write(&path, "keep").unwrap();
+            assert!(listen(&socket).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(listen(&socket).is_err());
+            assert!(
+                fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+            fs::remove_file(&path).unwrap();
+            if uid() == 0 {
+                let listener = UnixListener::bind(&path).unwrap();
+                std::os::unix::fs::chown(&path, Some(1), None).unwrap();
+                assert!(listen(&socket).is_err());
+                assert_eq!(fs::symlink_metadata(&path).unwrap().uid(), 1);
+                drop(listener);
+                fs::remove_file(&path).unwrap();
+            }
+        }
+    }
 }
