@@ -4,17 +4,11 @@ use thiserror::Error;
 
 use crate::model::{LocalSymbol, Resolution, ResolvedProgram, ResolvedStep, SymbolKey, Visibility};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct LocalShape {
     pub(crate) visibility: Visibility,
     pub(crate) syntax: String,
     pub(crate) steps: Vec<String>,
-}
-
-impl LocalShape {
-    pub(crate) fn fingerprint(&self) -> String {
-        format!("{:?}\n{}\n{:?}", self.visibility, self.syntax, self.steps)
-    }
 }
 
 #[derive(Clone, Debug)]

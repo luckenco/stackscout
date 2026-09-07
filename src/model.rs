@@ -136,7 +136,7 @@ pub(crate) struct ExportBinding {
     pub(crate) exported: ExportName,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum Visibility {
     Private,
     Public,

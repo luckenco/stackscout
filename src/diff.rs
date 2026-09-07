@@ -1,10 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::graph::{Graph, LocalShape};
 use crate::model::{Resolution, ResolvedStep, SourceRange, SymbolKey};
 
 const MAX_DEPTH: usize = 32;
 const MAX_NODES: usize = 10_000;
+
+// Exact keys: hash collisions are resolved by equality, not treated as equal trees.
+type Fingerprints = HashMap<(String, Option<LocalShape>, Vec<usize>), usize>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct GraphDiff {
@@ -29,20 +32,27 @@ pub(crate) struct TreeNode {
     pub(crate) hide_when_unchanged: bool,
     pub(crate) local_shape: Option<LocalShape>,
     pub(crate) children: Vec<TreeNode>,
+    // Assigned together for both sides of a comparison; nodes are immutable afterwards.
+    fingerprint: Option<usize>,
 }
 
 impl TreeNode {
-    pub(crate) fn fingerprint(&self) -> String {
-        let mut value = self.identity.clone();
-        value.push('{');
-        if let Some(shape) = &self.local_shape {
-            value.push_str(&shape.fingerprint());
+    pub(crate) fn fingerprint(&self) -> usize {
+        self.fingerprint
+            .expect("tree fingerprints must be assigned before comparison")
+    }
+
+    fn identify(&mut self, keys: &mut Fingerprints) {
+        for child in &mut self.children {
+            child.identify(keys);
         }
-        for child in &self.children {
-            value.push_str(&child.fingerprint());
-        }
-        value.push('}');
-        value
+        let key = (
+            self.identity.clone(),
+            self.local_shape.clone(),
+            self.children.iter().map(Self::fingerprint).collect(),
+        );
+        let next = keys.len();
+        self.fingerprint = Some(*keys.entry(key).or_insert(next));
     }
 
     pub(crate) fn contains(&self, identity: &str) -> bool {
@@ -93,12 +103,13 @@ pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
         }
     }
 
+    let mut fingerprints = Fingerprints::new();
     let mut minimal = minimal_roots(&roots, before);
     minimal.extend(minimal_roots(&roots, after));
     let mut output = minimal
         .into_iter()
         .filter_map(|key| {
-            let root = root_diff(before, after, &key);
+            let root = root_diff(before, after, &key, &mut fingerprints);
             root.is_changed().then_some(root)
         })
         .collect::<Vec<_>>();
@@ -106,7 +117,7 @@ pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
     for key in direct {
         let identity = key.to_string();
         if !output.iter().any(|root| root.contains(&identity)) {
-            output.push(root_diff(before, after, &key));
+            output.push(root_diff(before, after, &key, &mut fingerprints));
         }
     }
     output.sort_by(|left, right| left.identity().cmp(right.identity()));
@@ -142,11 +153,20 @@ impl RootDiff {
     }
 }
 
-fn root_diff(before: &Graph, after: &Graph, key: &SymbolKey) -> RootDiff {
-    RootDiff {
+fn root_diff(
+    before: &Graph,
+    after: &Graph,
+    key: &SymbolKey,
+    fingerprints: &mut Fingerprints,
+) -> RootDiff {
+    let mut root = RootDiff {
         before: tree(before, key),
         after: tree(after, key),
+    };
+    for tree in root.before.iter_mut().chain(&mut root.after) {
+        tree.identify(fingerprints);
     }
+    root
 }
 
 fn minimal_roots(candidates: &BTreeSet<SymbolKey>, graph: &Graph) -> BTreeSet<SymbolKey> {
@@ -254,6 +274,7 @@ fn expand(
     *nodes += 1;
     let node = &graph.symbols[key];
     let mut output = TreeNode {
+        fingerprint: None,
         identity: key.to_string(),
         label: key.to_string(),
         location_file: Some(
@@ -301,6 +322,7 @@ fn expand_steps(
             } => {
                 *nodes += 1;
                 output.push(TreeNode {
+                    fingerprint: None,
                     identity: format!("[branch:{key}]"),
                     label: label.clone(),
                     location_file: Some(file.to_owned()),
@@ -331,6 +353,7 @@ fn expand_steps(
                 Resolution::Unresolved(target) => {
                     *nodes += 1;
                     output.push(TreeNode {
+                        fingerprint: None,
                         identity: call.resolution.identity(),
                         label: format!("[unresolved: {target}]"),
                         location_file: Some(file.to_owned()),
@@ -344,6 +367,7 @@ fn expand_steps(
                 Resolution::Uncertain(target) => {
                     *nodes += 1;
                     output.push(TreeNode {
+                        fingerprint: None,
                         identity: call.resolution.identity(),
                         label: format!("[uncertain: {target} is locally bound]"),
                         location_file: Some(file.to_owned()),
@@ -382,6 +406,7 @@ fn expand_steps(
                         }
                     }
                     output.push(TreeNode {
+                        fingerprint: None,
                         identity: call.resolution.identity(),
                         label: format!("[ambiguous: {target} -> {label}]"),
                         location_file: Some(file.to_owned()),
@@ -400,6 +425,7 @@ fn expand_steps(
 
 fn cycle(key: &SymbolKey, file: &str, location: &SourceRange) -> TreeNode {
     TreeNode {
+        fingerprint: None,
         identity: key.to_string(),
         label: format!("{key} [cycle]"),
         location_file: Some(file.to_owned()),
@@ -413,6 +439,7 @@ fn cycle(key: &SymbolKey, file: &str, location: &SourceRange) -> TreeNode {
 
 fn truncated() -> TreeNode {
     TreeNode {
+        fingerprint: None,
         identity: "[truncated]".to_owned(),
         label: "[truncated]".to_owned(),
         location_file: None,
@@ -421,5 +448,33 @@ fn truncated() -> TreeNode {
         hide_when_unchanged: false,
         local_shape: None,
         children: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Fingerprints, truncated};
+
+    #[test]
+    fn fingerprints_preserve_child_boundaries_and_ignore_display_metadata() {
+        let mut left = truncated();
+        left.identity = "root".to_owned();
+        left.children = vec![truncated(), truncated()];
+        left.children[0].identity = "a".to_owned();
+        left.children[1].identity = "b".to_owned();
+        let mut right = left.clone();
+        right.children.truncate(1);
+        right.children[0].identity = "a{}b".to_owned();
+        // Recursive string concatenation gave both trees "root{a{}b{}}".
+        let mut keys = Fingerprints::new();
+        left.identify(&mut keys);
+        right.identify(&mut keys);
+        assert_ne!(left.fingerprint(), right.fingerprint());
+        let mut moved = left.clone();
+        moved.label = "display only".to_owned();
+        moved.location_file = Some("elsewhere.rs".to_owned());
+        moved.identify(&mut keys);
+        assert_eq!(left.fingerprint(), moved.fingerprint());
+        assert_eq!(keys.len(), 5);
     }
 }
