@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::Repository;
 use crate::{discover, model};
@@ -199,11 +200,53 @@ fn parser_version_and_mode_are_part_of_cache_identity() {
     assert!(repo.current.files["view.ts"].analysis.is_err());
     repo.analyzers.parsed.clear();
     assert!(!repo.change("view.tsx", source).unwrap());
-    repo.current.files.get_mut("view.tsx").unwrap().key.version = 0;
+    Arc::make_mut(
+        Arc::make_mut(&mut repo.current.files)
+            .get_mut("view.tsx")
+            .unwrap(),
+    )
+    .key
+    .version = 0;
     assert!(repo.change("view.tsx", source).unwrap());
-    repo.current.files.get_mut("view.tsx").unwrap().key.syntax = model::Syntax::TypeScript;
+    Arc::make_mut(
+        Arc::make_mut(&mut repo.current.files)
+            .get_mut("view.tsx")
+            .unwrap(),
+    )
+    .key
+    .syntax = model::Syntax::TypeScript;
     assert!(repo.change("view.tsx", source).unwrap());
     assert_eq!(repo.analyzers.parsed, ["view.tsx", "view.tsx"]);
+}
+
+#[test]
+fn snapshots_share_unchanged_artifacts_and_release_replaced_generations() {
+    let mut repo = Repository::new().unwrap();
+    repo.change("lib.rs", b"pub fn run() {}").unwrap();
+    repo.change("other.rs", b"fn other() {}").unwrap();
+    repo.checkpoint("saved");
+    let before = repo.snapshot();
+    assert!(Arc::ptr_eq(&before.files, &repo.checkpoints["saved"].files));
+    assert!(Arc::ptr_eq(&before.graph, &repo.checkpoints["saved"].graph));
+    let graph = Arc::downgrade(&before.graph);
+    repo.update(&BTreeMap::from([(
+        "lib.rs".to_owned(),
+        Some(b"pub fn run() { audit(); }".to_vec()),
+    )]))
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &before.files["other.rs"],
+        &repo.current.files["other.rs"]
+    ));
+    assert!(!Arc::ptr_eq(
+        &before.files["lib.rs"],
+        &repo.current.files["lib.rs"]
+    ));
+    assert!(!Arc::ptr_eq(&before.graph, &repo.current.graph));
+    assert!(repo.diff("saved").unwrap().contains("audit"));
+    repo.checkpoint("saved");
+    drop(before);
+    assert!(graph.upgrade().is_none());
 }
 
 #[test]

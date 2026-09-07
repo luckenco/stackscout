@@ -3,6 +3,7 @@ mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::{Error, analyze, diff, graph, model, render};
 
@@ -25,7 +26,7 @@ pub(crate) struct File {
 /// empty, `.` or `..` components, backslashes, or colons. Unsupported extensions
 /// and declaration-only TypeScript files are rejected. No method reads files.
 /// Updates reparse only the changed file, then rebuild resolution and all graph
-/// edges from cached artifacts. Checkpoints clone artifacts, diagnostics and graph.
+/// edges from cached artifacts. Checkpoints share immutable artifacts, diagnostics and graph.
 ///
 /// ```
 /// let mut repo = stackscout::Repository::new()?;
@@ -98,10 +99,10 @@ impl Repository {
         if updates.is_empty() {
             return Ok(false);
         }
-        let mut files = self.current.files.clone();
+        let mut files = (*self.current.files).clone();
         for (path, file) in updates {
             if let Some(file) = file {
-                files.insert(path, file);
+                files.insert(path, Arc::new(file));
             } else {
                 files.remove(&path);
             }
@@ -111,7 +112,10 @@ impl Repository {
                 .values()
                 .filter_map(|file| file.analysis.as_ref().ok()),
         )?;
-        self.current = Snapshot { files, graph };
+        self.current = Snapshot {
+            files: Arc::new(files),
+            graph: Arc::new(graph),
+        };
         Ok(true)
     }
 
@@ -170,8 +174,8 @@ pub(crate) fn source_path(path: &str) -> Result<model::Syntax, Error> {
 
 #[derive(Clone, Default)]
 pub(crate) struct Snapshot {
-    files: BTreeMap<String, File>,
-    pub(crate) graph: graph::Graph,
+    files: Arc<BTreeMap<String, Arc<File>>>,
+    pub(crate) graph: Arc<graph::Graph>,
 }
 
 impl Snapshot {
@@ -220,11 +224,11 @@ impl Snapshot {
             .chain(file.as_ref().and_then(|file| file.analysis.as_ref().ok()));
         let graph = crate::build(artifacts)?;
         if let Some(file) = file {
-            self.files.insert(path.to_owned(), file);
+            Arc::make_mut(&mut self.files).insert(path.to_owned(), Arc::new(file));
         } else {
-            self.files.remove(path);
+            Arc::make_mut(&mut self.files).remove(path);
         }
-        self.graph = graph;
+        self.graph = Arc::new(graph);
         Ok(())
     }
 
