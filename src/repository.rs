@@ -304,8 +304,9 @@ impl Snapshot {
             return Ok(crate::review::compare(&self.graph, &after.graph, scope));
         }
         // Preserve the diff contract: analysis failures are not symbol deletions/additions.
-        let mut output =
-            crate::review::compare(&self.without(&omitted)?, &after.without(&omitted)?, scope);
+        let before_graph = self.without(&omitted)?;
+        let after_graph = after.without(&omitted)?;
+        let mut output = crate::review::compare(&before_graph, &after_graph, scope);
         output.truncated |= issues.len() > 32;
         output.analysis_issues = issues
             .iter()
@@ -326,12 +327,22 @@ impl Snapshot {
         Ok(output)
     }
 
-    fn without(&self, omitted: &BTreeSet<String>) -> Result<graph::Graph, Error> {
+    fn without(&self, omitted: &BTreeSet<String>) -> Result<Arc<graph::Graph>, Error> {
+        // Failed/missing files already contribute nothing to this graph. Re-resolve only
+        // when the other snapshot's failures exclude a successfully analyzed artifact here.
+        if !omitted.iter().any(|path| {
+            self.files
+                .get(path)
+                .is_some_and(|file| file.analysis.is_ok())
+        }) {
+            return Ok(Arc::clone(&self.graph));
+        }
         crate::build(self.files.iter().filter_map(|(path, file)| {
             if omitted.contains(path) {
                 return None;
             }
             file.analysis.as_ref().ok()
         }))
+        .map(Arc::new)
     }
 }

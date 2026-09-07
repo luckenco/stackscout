@@ -117,6 +117,74 @@ fn batch_updates_match_fixtures_and_reuse_unchanged_analysis() {
 }
 
 #[test]
+fn failure_filtering_reuses_graphs_unless_a_valid_artifact_is_removed() {
+    let mut repo = Repository::new().unwrap();
+    repo.change("bad.ts", b"export function work() {}").unwrap();
+    repo.change(
+        "api.ts",
+        b"import { work } from './bad'; export function run() { work(); }",
+    )
+    .unwrap();
+    let before = repo.snapshot();
+    repo.change("bad.ts", b"export function work(").unwrap();
+    let after = repo.snapshot();
+    let omitted = std::collections::BTreeSet::from(["bad.ts".to_owned(), "missing.ts".to_owned()]);
+    let filtered = before.without(&omitted).unwrap();
+    assert!(!Arc::ptr_eq(&before.graph, &filtered));
+    assert!(Arc::ptr_eq(&after.graph, &after.without(&omitted).unwrap()));
+    assert!(
+        crate::diff::compare(&filtered, &after.graph)
+            .roots
+            .is_empty()
+    );
+    assert!(
+        before
+            .compare(&after, false, false)
+            .unwrap()
+            .contains("bad.ts")
+    );
+    assert!(
+        after
+            .compare(&after, true, false)
+            .unwrap()
+            .contains("bad.ts")
+    );
+
+    repo.change(
+        "api.ts",
+        b"import { work } from './bad'; export function run() { work(); extra(); }",
+    )
+    .unwrap();
+    let next = repo.snapshot();
+    assert!(Arc::ptr_eq(&next.graph, &next.without(&omitted).unwrap()));
+    assert!(
+        after
+            .compare(&next, false, false)
+            .unwrap()
+            .contains("extra")
+    );
+    assert!(
+        after
+            .compare(&next, true, false)
+            .unwrap()
+            .contains("bad.ts")
+    );
+    #[cfg(unix)]
+    {
+        let scope = crate::review::Scope {
+            files: vec!["api.ts".to_owned()],
+            symbols: vec![],
+        };
+        let review = before.review(&after, &scope).unwrap();
+        assert!(review.witnesses.is_empty());
+        assert_eq!(review.analysis_issues.len(), 1);
+        let review = after.review(&next, &scope).unwrap();
+        assert!(!review.witnesses.is_empty());
+        assert_eq!(review.analysis_issues.len(), 2);
+    }
+}
+
+#[test]
 fn failed_batches_preserve_published_snapshots_and_all_files() {
     let mut repo = Repository::new().unwrap();
     repo.change("lib.rs", b"pub fn run() {}").unwrap();
