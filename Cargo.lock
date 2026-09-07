@@ -499,6 +499,7 @@ dependencies = [
  "blake3",
  "ignore",
  "libc",
+ "mio",
  "notify-debouncer-full",
  "rayon",
  "serde",

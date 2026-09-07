@@ -1,8 +1,11 @@
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+
+use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -166,79 +169,145 @@ pub fn serve(root: &Path) -> io::Result<()> {
 }
 
 struct Client {
+    token: Token,
     stream: UnixStream,
     bytes: Vec<u8>,
     deadline: Instant,
 }
 
-// Poll only bounded, incomplete frames. Slow senders never occupy graph-query workers.
+impl Client {
+    fn unregister(&self, registry: &mio::Registry) -> io::Result<()> {
+        registry.deregister(&mut SourceFd(&self.stream.as_raw_fd()))
+    }
+
+    // Drain readiness, bounded by one maximum-size frame and its absolute deadline.
+    fn read(&mut self) -> io::Result<Option<usize>> {
+        let mut buffer = [0; 4096];
+        loop {
+            if Instant::now() >= self.deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "request deadline exceeded",
+                ));
+            }
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return Err(io::Error::other("request must end with a newline")),
+                Ok(count) => {
+                    self.bytes.extend_from_slice(&buffer[..count]);
+                    if self.bytes.len() as u64 > protocol::MAX_REQUEST {
+                        return Err(io::Error::other("request exceeds 64 KiB"));
+                    }
+                    if let Some(end) = buffer[..count].iter().position(|byte| *byte == b'\n') {
+                        return Ok(Some(self.bytes.len() - count + end));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+// Readiness-driven ingress; slow senders never occupy graph-query workers.
 fn ingress(
     listener: &UnixListener,
     shared: &Shared,
     updates: &mpsc::SyncSender<Update>,
     queries: &mpsc::SyncSender<(UnixStream, protocol::Operation)>,
 ) -> io::Result<()> {
-    let mut clients = VecDeque::new();
+    let mut poll = Poll::new()?;
+    poll.registry().register(
+        &mut SourceFd(&listener.as_raw_fd()),
+        Token(0),
+        Interest::READABLE,
+    )?;
+    let mut events = Events::with_capacity(65);
+    let mut clients = VecDeque::<Client>::new();
+    let mut next = 1usize;
+    let mut accepting = false;
     loop {
+        let mut timeout = clients
+            .front()
+            .map(|client| client.deadline.saturating_duration_since(Instant::now()));
+        if accepting {
+            // An edge-triggered listener may still have backlog after the acceptance budget.
+            timeout = Some(Duration::ZERO);
+        }
+        match poll.poll(&mut events, timeout) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+        while clients
+            .front()
+            .is_some_and(|client| Instant::now() >= client.deadline)
+        {
+            clients.pop_front().unwrap().unregister(poll.registry())?;
+        }
+        for event in &events {
+            if event.token() == Token(0) {
+                accepting = true;
+                continue;
+            }
+            let Some(index) = clients
+                .iter()
+                .position(|client| client.token == event.token())
+            else {
+                continue;
+            };
+            let result = clients[index].read();
+            if matches!(result, Ok(None)) {
+                continue;
+            }
+            let client = clients.remove(index).unwrap();
+            client.unregister(poll.registry())?;
+            match result {
+                Ok(Some(end)) => dispatch(
+                    client.stream,
+                    &client.bytes[..end],
+                    shared,
+                    updates,
+                    queries,
+                ),
+                Err(error) => reject(client.stream, &shared.failure(error.to_string())),
+                Ok(None) => unreachable!("incomplete clients remain registered"),
+            }
+        }
+        if !accepting {
+            continue;
+        }
         for _ in 0..32 {
             match listener.accept() {
                 Ok((stream, _)) => {
                     stream.set_nonblocking(true)?;
                     if clients.len() == 64 {
-                        clients.pop_front(); // Evict the oldest incomplete frame, not a queued mutation.
+                        clients.pop_front().unwrap().unregister(poll.registry())?;
                     }
+                    let token = Token(next);
+                    next = next
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("client token exhausted"))?;
+                    poll.registry().register(
+                        &mut SourceFd(&stream.as_raw_fd()),
+                        token,
+                        Interest::READABLE,
+                    )?;
                     clients.push_back(Client {
+                        token,
                         stream,
                         bytes: Vec::new(),
                         deadline: Instant::now() + Duration::from_secs(5),
                     });
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    accepting = false;
+                    break;
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             }
         }
-        for _ in 0..clients.len() {
-            let mut client = clients
-                .pop_front()
-                .expect("client count is fixed during polling");
-            if Instant::now() >= client.deadline {
-                continue;
-            }
-            let mut buffer = [0; 4096];
-            match client.stream.read(&mut buffer) {
-                Ok(0) => reject(
-                    client.stream,
-                    &shared.failure("request must end with a newline"),
-                ),
-                Ok(count) => {
-                    client.bytes.extend_from_slice(&buffer[..count]);
-                    if client.bytes.len() as u64 > protocol::MAX_REQUEST {
-                        reject(client.stream, &shared.failure("request exceeds 64 KiB"));
-                    } else if let Some(end) = client.bytes.iter().position(|byte| *byte == b'\n') {
-                        dispatch(
-                            client.stream,
-                            &client.bytes[..end],
-                            shared,
-                            updates,
-                            queries,
-                        );
-                    } else {
-                        clients.push_back(client);
-                    }
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    clients.push_back(client)
-                }
-                Err(_) => {}
-            }
-        }
-        thread::sleep(Duration::from_millis(2));
     }
 }
 

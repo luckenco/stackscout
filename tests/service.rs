@@ -299,6 +299,68 @@ fn slow_frames_and_waiting_updates_do_not_occupy_read_workers() {
 }
 
 #[test]
+fn readiness_drains_large_frames_and_expires_idle_connections() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixStream;
+    let mut workspace = Workspace::new();
+    workspace.start();
+    request(&workspace.root, r#"{"version":1,"op":"sync","paths":[]}"#);
+    let socket = workspace.root.join(".stackscout/service.sock");
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    let mut frame = br#"{"version":1,"op":"status"}"#.to_vec();
+    frame.resize(64 * 1024 - 1, b' ');
+    frame.push(b'\n');
+    // Crossing every 4-KiB boundary must not strand edge-triggered readiness.
+    stream.write_all(&frame).unwrap();
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).unwrap();
+    assert!(serde_json::from_str::<Value>(&reply).unwrap()["error"].is_null());
+
+    let mut idle = UnixStream::connect(&socket).unwrap();
+    idle.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+    idle.write_all(b"{").unwrap();
+    // No new I/O events: the poll timeout itself must close an expired frame.
+    assert_eq!(idle.read(&mut [0; 1]).unwrap(), 0);
+}
+
+#[test]
+fn acceptance_budget_does_not_strand_a_ready_listener() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let mut workspace = Workspace::new();
+    workspace.start();
+    let owner = request(&workspace.root, r#"{"version":1,"op":"status"}"#);
+    let pid = owner["instance"]
+        .as_str()
+        .unwrap()
+        .split('-')
+        .next()
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    // Queue more than one acceptance batch before the owner can see its readiness edge.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    let socket = workspace.root.join(".stackscout/service.sock");
+    let mut waiting = Vec::new();
+    for _ in 0..40 {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.write_all(b"{").unwrap();
+        waiting.push(stream);
+    }
+    let mut last = UnixStream::connect(&socket).unwrap();
+    last.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    last.write_all(b"{\"version\":1,\"op\":\"status\"}\n")
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+    let mut reply = String::new();
+    BufReader::new(last).read_line(&mut reply).unwrap();
+    assert!(serde_json::from_str::<Value>(&reply).unwrap()["error"].is_null());
+}
+
+#[test]
 fn oversized_sources_preserve_the_previous_generation() {
     let mut workspace = Workspace::new();
     fs::write(workspace.root.join("lib.rs"), "pub fn run() {}").unwrap();
