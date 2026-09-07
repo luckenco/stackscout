@@ -33,12 +33,20 @@ struct Generation {
     issues: Vec<String>,
 }
 
+struct CachedDiff {
+    // Generation numbers are unique within this owner. Service diffs always include locations.
+    key: (u64, u64, bool), // before, after, diagnostics
+    text: String,
+    truncated: bool,
+}
+
 #[derive(Default)]
 struct State {
     current: Option<Arc<Generation>>,
     checkpoints: BTreeMap<String, Arc<Generation>>,
     reviews: BTreeMap<String, review::Checkpoint>,
     next_review: u64,
+    diffs: Vec<CachedDiff>,
     progress: Option<protocol::Progress>,
     last_error: Option<String>,
     files_parsed: usize,
@@ -160,6 +168,12 @@ fn query(shared: &Shared, operation: Operation) -> Response {
                 return response;
             };
             response.checkpoint_generation = Some(before.number);
+            let key = (before.number, current.number, diagnostics);
+            if let Some(cached) = state.diffs.iter().find(|entry| entry.key == key) {
+                response.diff = Some(cached.text.clone());
+                response.truncated = cached.truncated;
+                return response; // Response headers above describe current health, not cached health.
+            }
             drop(state); // Expensive comparisons must not block publication or other readers.
             match before
                 .snapshot
@@ -178,6 +192,21 @@ fn query(shared: &Shared, operation: Operation) -> Response {
                         output.truncate(end);
                         output.push_str("\n[truncated: diff exceeds 48 KiB]\n");
                         response.truncated = true;
+                    }
+                    if before.number != current.number {
+                        let mut state = shared.state.lock().expect("service state poisoned");
+                        // Four bounded payloads, FIFO; no snapshots are retained. Concurrent misses
+                        // may compute independently, but cannot create duplicate cache entries.
+                        if !state.diffs.iter().any(|entry| entry.key == key) {
+                            if state.diffs.len() == 4 {
+                                state.diffs.remove(0);
+                            }
+                            state.diffs.push(CachedDiff {
+                                key,
+                                text: output.clone(),
+                                truncated: response.truncated,
+                            });
+                        }
                     }
                     response.diff = Some(output);
                 }

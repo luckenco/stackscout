@@ -732,6 +732,13 @@ fn protocol_errors_and_output_limits_are_explicit() {
             .unwrap()
             .ends_with("[truncated: diff exceeds 48 KiB]\n")
     );
+    assert_eq!(
+        request(
+            &workspace.root,
+            r#"{"version":1,"op":"diff","name":"before"}"#
+        ),
+        diff
+    );
     let chain = (0..40)
         .map(|i| format!("fn f{i}() {{ f{}(); }}\n", i + 1))
         .collect::<String>();
@@ -751,6 +758,13 @@ fn protocol_errors_and_output_limits_are_explicit() {
     assert_eq!(diff["truncated"], true);
     assert!(diff["diff"].as_str().unwrap().contains("[truncated]"));
     assert!(!diff["diff"].as_str().unwrap().contains("exceeds 48 KiB"));
+    assert_eq!(
+        request(
+            &workspace.root,
+            r#"{"version":1,"op":"diff","name":"before"}"#
+        ),
+        diff
+    );
 }
 
 #[test]
