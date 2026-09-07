@@ -22,6 +22,17 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<String, String> {
             stackscout::service::serve(&PathBuf::from(root)).map_err(|error| error.to_string())?;
             return Ok(String::new());
         }
+        [command, root] if command == "connect" => {
+            let root = PathBuf::from(root);
+            // A read-only handshake owns startup; never send/replay a caller's mutation here.
+            request(&root, r#"{"version":1,"op":"status"}"#).map_err(|error| error.to_string())?;
+            let (root, socket) =
+                stackscout::service::endpoint(&root).map_err(|error| error.to_string())?;
+            return Ok(
+                serde_json::json!({"version": 1, "root": root, "socket": socket}).to_string()
+                    + "\n",
+            );
+        }
         [command, root, json] if command == "request" => {
             let json = json.to_str().ok_or("request must be UTF-8 JSON")?;
             return request(&PathBuf::from(root), json).map_err(|error| error.to_string());
@@ -46,7 +57,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: stackscout diff-dir [--diagnostics] <before-directory> <after-directory>\n       stackscout serve <root> | request <root> '<json>' (Unix only)".to_owned()
+    "usage: stackscout diff-dir [--diagnostics] <before-directory> <after-directory>\n       stackscout serve <root> | connect <root> | request <root> '<json>' (Unix only)".to_owned()
 }
 
 #[cfg(unix)]

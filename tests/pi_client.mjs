@@ -1,6 +1,7 @@
 // Isolated real Pi SDK process. Only the model is scripted; loader, sessions, tools,
 // lifecycle, filesystem, subprocess execution, and StackScout service are real.
 import { createInterface } from "node:readline";
+import { channel } from "node:diagnostics_channel";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -43,6 +44,11 @@ const loader = new sdk.DefaultResourceLoader({
 		},
 	})],
 });
+// Observe real socket lifetimes without replacing the transport or the SDK.
+channel("net.client.socket").subscribe(({ socket }) => {
+	socket.once("connect", () => process.send?.({ socket: "open" }));
+	socket.once("close", () => process.send?.({ socket: "close" }));
+});
 await loader.reload();
 const sessionManager = sessionFile
 	? sdk.SessionManager.open(sessionFile, join(agentDir, "sessions"))
@@ -62,7 +68,7 @@ function info() {
 }
 function reply(value) { process.stdout.write(JSON.stringify(value) + "\n"); }
 reply(info());
-// The parent sends this only after observing a real, blocked StackScout subprocess.
+// The parent sends this only after observing a real, blocked StackScout connection.
 process.on("SIGUSR2", () => { void session.abort(); });
 
 for await (const line of createInterface({ input: process.stdin })) {
@@ -86,3 +92,4 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 session.dispose();
+if (process.connected) process.disconnect();

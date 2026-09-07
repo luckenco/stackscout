@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { exchange, Unavailable, type Endpoint } from "../transport.ts";
 
 const STATE = "stackscout-session-v1";
 const WARNING = "Syntactic analysis only: unresolved/dynamic calls may be missing; no path does not prove no impact.";
@@ -41,6 +42,7 @@ export default function (pi: ExtensionAPI) {
 	let baseline: Baseline = { status: "unavailable", reason: "Session initialization has not completed" };
 	let acknowledged: Generation | undefined;
 	let root: string | undefined;
+	let endpoint: Endpoint | undefined;
 	let updates = Promise.resolve();
 	let needsRescan = false;
 	const lifetime = new AbortController();
@@ -66,7 +68,17 @@ export default function (pi: ExtensionAPI) {
 		const combined = AbortSignal.any(signals);
 		combined.throwIfAborted();
 		root ??= await realpath(ctx.cwd);
-		const response = await request(pi, root, operation, combined);
+		endpoint ??= await connect(pi, root, combined);
+		let value: unknown;
+		try {
+			value = await exchange(endpoint, operation, combined);
+		} catch (error) {
+			if (!(error instanceof Unavailable)) throw error;
+			endpoint = await connect(pi, root, combined);
+			value = await exchange(endpoint, operation, combined);
+		}
+		combined.throwIfAborted();
+		const response = validate(value, root);
 		if (baseline.status === "ready" && response.instance !== baseline.instance) {
 			fail(ctx, "Repository service restarted; the original checkpoint was lost");
 		}
@@ -319,15 +331,24 @@ function checkGeneration(response: Response, expected: Generation) {
 	}
 }
 
-async function request(pi: ExtensionAPI, root: string, operation: object, signal: AbortSignal): Promise<Response> {
+async function connect(pi: ExtensionAPI, root: string, signal: AbortSignal): Promise<Endpoint> {
 	signal.throwIfAborted();
 	const binary = process.env.STACKSCOUT_BIN || join(root, "target", "debug", "stackscout");
-	const result = await pi.exec(binary, ["request", root, JSON.stringify({ version: 1, ...operation })], { cwd: root, signal, timeout: 125_000 });
+	const result = await pi.exec(binary, ["connect", root], { cwd: root, signal, timeout: 125_000 });
 	signal.throwIfAborted();
 	if (result.code !== 0 || result.killed) {
-		throw new Error(result.stderr.trim() || "StackScout request failed or timed out; run cargo build before starting Pi");
+		throw new Error(result.stderr.trim() || "StackScout connection failed or timed out; run cargo build before starting Pi");
 	}
-	const response = JSON.parse(result.stdout) as Response;
+	const endpoint = JSON.parse(result.stdout);
+	if (!endpoint || endpoint.version !== 1 || endpoint.root !== root
+		|| typeof endpoint.socket !== "string" || !isAbsolute(endpoint.socket)) {
+		throw new Error("Invalid StackScout endpoint; rebuild the binary before starting Pi");
+	}
+	return endpoint;
+}
+
+function validate(value: unknown, root: string): Response {
+	const response = value as Response;
 	if (!response || response.version !== 1 || response.root !== root || typeof response.instance !== "string"
 		|| (response.generation !== null && (!Number.isSafeInteger(response.generation) || response.generation < 1))
 		|| typeof response.index_complete !== "boolean" || typeof response.watching !== "boolean"

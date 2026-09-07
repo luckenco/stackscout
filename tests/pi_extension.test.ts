@@ -15,11 +15,17 @@ mock.module("@earendil-works/pi-ai", () => ({ StringEnum: () => ({}) }));
 mock.module("typebox", () => ({ Type: {
 	Object: () => ({}), Array: () => ({}), Optional: () => ({}), Boolean: () => ({}), String: () => ({}), Integer: () => ({}),
 } }));
+class Unavailable extends Error {}
+const endpoints = new Map<string, (op: Operation, signal?: AbortSignal) => Promise<object>>();
+mock.module("../.pi/transport.ts", () => ({
+	Unavailable,
+	exchange: (endpoint: { socket: string }, operation: Operation, signal: AbortSignal) => endpoints.get(endpoint.socket)!(operation, signal),
+}));
 const { default: extension } = await import("../.pi/extensions/stackscout.ts");
 
 let cwd: string;
 beforeEach(async () => { cwd = await realpath(await mkdtemp(join(tmpdir(), "stackscout-test-"))); });
-afterEach(async () => { mock.restore(); await rm(cwd, { recursive: true, force: true }); });
+afterEach(async () => { mock.restore(); endpoints.clear(); await rm(cwd, { recursive: true, force: true }); });
 
 type Entry = { type: "custom"; customType: string; data: unknown };
 type Operation = { op: string; paths?: string[]; name?: string; baseline?: string; baseline_generation?: number; scope?: { files: string[]; symbols: string[] }; token?: string };
@@ -32,6 +38,18 @@ function harness(
 	const tools = new Map<string, ToolDefinition>();
 	const notices: string[] = [];
 	const calls: Operation[] = [];
+	let starts = 0;
+	const socket = join(cwd, crypto.randomUUID() + ".sock");
+	endpoints.set(socket, async (operation, signal) => {
+		calls.push(operation);
+		return {
+			version: 1, root: cwd, instance: "owner-1", generation: 1,
+			index_complete: true, watching: true, recovery_needed: false, watcher_error: null,
+			last_update_error: null, analysis_issue_count: 0, analysis_issues: [], progress: null,
+			checkpoint_generation: 1, diff: "", graph: { symbols: [], calls: [] }, truncated: false, error: null,
+			...await handle(operation, signal),
+		};
+	});
 	const ctx = {
 		cwd, hasUI: true, ui: { notify: (text: string) => notices.push(text) },
 		sessionManager: { getSessionId: () => sessionId, getEntries: () => entries },
@@ -40,17 +58,10 @@ function harness(
 		on: (name: string, handler: any) => handlers.set(name, handler),
 		registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
 		appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
-		exec: async (_command: string, args: string[], options: { signal?: AbortSignal }) => {
-			const operation = JSON.parse(args[2]) as Operation;
-			calls.push(operation);
-			const response = {
-				version: 1, root: cwd, instance: "owner-1", generation: 1,
-				index_complete: true, watching: true, recovery_needed: false, watcher_error: null,
-				last_update_error: null, analysis_issue_count: 0, analysis_issues: [], progress: null,
-				checkpoint_generation: 1, diff: "", graph: { symbols: [], calls: [] }, truncated: false, error: null,
-				...await handle(operation, options.signal),
-			};
-			return { code: 0, stdout: JSON.stringify(response), stderr: "", killed: false };
+		exec: async (_command: string, args: string[]) => {
+			expect(args).toEqual(["connect", cwd]);
+			starts++;
+			return { code: 0, stdout: JSON.stringify({ version: 1, root: cwd, socket }), stderr: "", killed: false };
 		},
 	} as unknown as ExtensionAPI);
 	return {
@@ -58,7 +69,7 @@ function harness(
 		close: () => handlers.get("session_shutdown")!({}, ctx),
 		run: (name = "call_graph_diff", params = {}, signal?: AbortSignal) => tools.get(name)!.execute("call", params, signal, undefined, ctx),
 		write: (path: string, isError = false, toolName = "write") => handlers.get("tool_result")!({ toolName, input: { path }, isError, content: [] }, ctx),
-		calls, entries, notices,
+		calls, entries, notices, get starts() { return starts; },
 	};
 }
 
@@ -70,6 +81,25 @@ test("factory is inert; only current-graph first use can start resources", async
 	await app.run("call_graph", { action: "callers", symbol: "run" });
 	expect(app.calls.map((call) => call.op)).toEqual(["rescan", "callers"]);
 	expect(app.entries).toEqual([]);
+});
+
+test("bootstrap is reused and only pre-connect absence allows an automatic retry", async () => {
+	let failure: Error | undefined;
+	const app = harness(() => {
+		if (failure) { const error = failure; failure = undefined; throw error; }
+		return {};
+	});
+	await app.start();
+	await app.run();
+	expect(app.starts).toBe(1);
+	failure = new Unavailable("owner stopped");
+	await app.run();
+	expect(app.starts).toBe(2);
+	const calls = app.calls.length;
+	failure = new Error("reply lost after sending mutation");
+	await expect(app.run()).rejects.toThrow("reply lost");
+	expect(app.calls.length).toBe(calls + 1);
+	expect(app.starts).toBe(2);
 });
 
 test("capture intent precedes I/O; reload/resume reuse the original checkpoint without creating it", async () => {
@@ -381,7 +411,7 @@ test("review acknowledgement does not rescan or acknowledge another session/owne
 	const name = `${app.calls.at(-1)!.name}-review-scope`;
 	const start = app.calls.length;
 	const result = await app.run("call_graph_ack", { review: name, token: "owner-1:1" });
-	expect(app.calls.slice(start)).toEqual([{ version: 1, op: "acknowledge", name, token: "owner-1:1" }]);
+	expect(app.calls.slice(start)).toEqual([{ op: "acknowledge", name, token: "owner-1:1" }]);
 	expect(result.details).toMatchObject({ generation: 3, checkpoint_generation: 2, baseline: { generation: 1 } });
 	await expect(app.run("call_graph_ack", { review: name, token: "owner-2:1" })).rejects.toThrow("does not belong");
 	await expect(app.run("call_graph_ack", { review: "other", token: "owner-1:1" })).rejects.toThrow("does not belong");

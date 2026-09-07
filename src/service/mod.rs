@@ -10,7 +10,7 @@ mod tests;
 mod unix;
 mod watch;
 
-pub use unix::{request, serve};
+pub use unix::{endpoint, request, serve};
 
 use std::collections::BTreeMap;
 use std::fs;

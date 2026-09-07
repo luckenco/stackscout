@@ -18,7 +18,7 @@ fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-fn endpoint(root: &Path) -> io::Result<(PathBuf, PathBuf)> {
+fn paths(root: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let root = root.canonicalize()?;
     if !root.is_dir() {
         return Err(io::Error::other("workspace root must be a directory"));
@@ -89,7 +89,7 @@ fn listen(socket: &Path) -> io::Result<UnixListener> {
 /// `STACKSCOUT_INDEX_THREADS` selects 1–8 indexing threads (default: available CPUs, capped at 4).
 /// `STACKSCOUT_WATCH=0` disables automatic watching/reconciliation for explicit-update workflows.
 pub fn serve(root: &Path) -> io::Result<()> {
-    let (root, socket) = endpoint(root)?;
+    let (root, socket) = paths(root)?;
     let directory = root.join(".stackscout");
     private_directory(&directory, true)?;
     private_directory(socket.parent().expect("socket has a parent"), true)?;
@@ -392,6 +392,32 @@ pub(super) fn reply(mut stream: UnixStream, response: &protocol::Response) -> io
     Ok(())
 }
 
+/// Returns the canonical root and permission-checked Unix socket path.
+///
+/// Does not connect or start an owner; an owned stale socket can still pass these checks.
+/// Revalidate before connecting, and validate the response's root and protocol identity.
+///
+/// ```
+/// let root = tempfile::tempdir()?;
+/// assert!(stackscout::service::endpoint(root.path()).is_err());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn endpoint(root: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let (root, socket) = paths(root)?;
+    private_directory(&root.join(".stackscout"), false)?;
+    private_directory(socket.parent().expect("socket has a parent"), false)?;
+    let metadata = fs::symlink_metadata(&socket)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != uid()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(io::Error::other(
+            "service endpoint must be an owned, mode-0600 socket",
+        ));
+    }
+    Ok((root, socket))
+}
+
 /// Sends one newline-delimited protocol-v1 JSON request to an existing service.
 ///
 /// This function does not start a process or retry mutations. Responses carry operation
@@ -405,17 +431,6 @@ pub fn request(root: &Path, json: &str) -> io::Result<String> {
         ));
     }
     let (root, socket) = endpoint(root)?;
-    private_directory(&root.join(".stackscout"), false)?;
-    private_directory(socket.parent().expect("socket has a parent"), false)?;
-    let metadata = fs::symlink_metadata(&socket)?;
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != uid()
-        || metadata.mode() & 0o777 != 0o600
-    {
-        return Err(io::Error::other(
-            "service endpoint must be an owned, mode-0600 socket",
-        ));
-    }
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;

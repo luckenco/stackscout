@@ -32,7 +32,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	for (const app of clients) app.child.stdin.end();
 	let forced = false;
-	// Pi's exec cancellation keeps a five-second escalation timer alive.
+	// Bound cleanup, including a failed startup's subprocess escalation timer.
 	const timeout = setTimeout(() => {
 		forced = true;
 		for (const app of clients) app.child.kill("SIGKILL");
@@ -67,11 +67,17 @@ async function client(sessionFile?: string) {
 	if (sessionFile) args.push(sessionFile);
 	const child = spawn("node", args, {
 		env: { ...process.env, PI_OFFLINE: "1", STACKSCOUT_WATCH: "0", STACKSCOUT_BIN: binary },
-		stdio: ["pipe", "pipe", "pipe"],
+		stdio: ["pipe", "pipe", "pipe", "ipc"],
+	});
+	let opened = 0;
+	let closed = 0;
+	child.on("message", (message: { socket: string }) => {
+		if (message.socket === "open") opened++;
+		if (message.socket === "close") closed++;
 	});
 	let stderr = "";
-	child.stderr.on("data", (data) => { stderr += data; });
-	const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+	child.stderr!.on("data", (data) => { stderr += data; });
+	const lines = createInterface({ input: child.stdout! })[Symbol.asyncIterator]();
 	const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
 		child.once("close", (code, signal) => resolve({ code, signal }));
 	});
@@ -84,7 +90,8 @@ async function client(sessionFile?: string) {
 	}
 	const app = {
 		child, exited, ready: undefined as any,
-		async send(command: object) { child.stdin.write(JSON.stringify(command) + "\n"); return receive(); },
+		get opened() { return opened; }, get closed() { return closed; },
+		async send(command: object) { child.stdin!.write(JSON.stringify(command) + "\n"); return receive(); },
 	};
 	clients.push(app);
 	app.ready = await receive();
@@ -92,6 +99,18 @@ async function client(sessionFile?: string) {
 }
 
 const live = test.skipIf(!pkg);
+
+live("direct Pi transport uses the checked fallback endpoint for long roots", async () => {
+	root = join(root, "long-workspace-".repeat(10));
+	await mkdir(root);
+	await writeFile(join(root, "lib.rs"), "pub fn run() { audit(); } fn audit() {}\n");
+	const app = await client();
+	expect(app.ready.baseline.status).toBe("ready");
+	expect(existsSync(join(root, ".stackscout/service.sock"))).toBe(false);
+	const result = await app.send({ name: "call_graph", params: { action: "callees", symbol: "run" } });
+	expect(result.isError).toBe(false);
+	expect(result.details.graph.symbols).toHaveLength(2);
+}, 60_000);
 
 live("two real Pi processes share parsing, acknowledge edit/write, and preserve baseline meaning across lifecycle", async () => {
 	const a = await client();
@@ -137,8 +156,9 @@ live("two real Pi processes share parsing, acknowledge edit/write, and preserve 
 	process.kill(Number(owner.split("-")[0]), "SIGKILL");
 	// Wait for the old owner to release its lock before the CLI starts its replacement.
 	await Bun.sleep(50);
-	expect(request({ op: "sync", paths: [] }).instance).not.toBe(owner);
+	// The adapter reconnects/starts the replacement itself, without recreating a baseline.
 	expect((await resumed.send({ name: "call_graph_diff" })).isError).toBe(true);
+	expect(request({ op: "status" }).instance).not.toBe(owner);
 	expect((await resumed.send({ op: "reload" })).baseline.status).toBe("unavailable");
 	expect((await resumed.send({ name: "call_graph", params: { action: "impact", symbol: "audit" } })).isError).toBe(false);
 }, 60_000);
@@ -198,37 +218,30 @@ live("scoped review keeps concurrent later writes visible across acknowledgement
 	expect(clean.details.review.witnesses).toEqual([]);
 }, 60_000);
 
-live("cancelling a spawned request leaves the owner and checkpoint usable, then exits cleanly", async () => {
+live("cancelling a direct request closes its socket without killing the owner or checkpoint", async () => {
 	const app = await client();
 	const owner = request({ op: "status" }).instance;
 	const ownerPid = Number(owner.split("-")[0]);
 	process.kill(ownerPid, "SIGSTOP");
 	try {
+		const opened = app.opened;
 		const pending = app.send({ name: "call_graph", params: { action: "callers", symbol: "audit", refresh: true } });
-		// Hold the owner so the real request cannot finish before cancellation.
 		const deadline = Date.now() + 10_000;
-		let requestPid: number | undefined;
-		while (!requestPid) {
-			const processes = Bun.spawnSync(["ps", "-axo", "pid=,ppid=,comm="]);
-			if (processes.exitCode !== 0) throw new Error(processes.stderr.toString());
-			for (const line of processes.stdout.toString().trim().split("\n")) {
-				const [pid, parent, ...command] = line.trim().split(/\s+/);
-				if (Number(parent) === app.child.pid && command.join(" ").endsWith("stackscout")) requestPid = Number(pid);
-			}
-			if (Date.now() > deadline) throw new Error("Pi did not spawn a StackScout request");
-			if (!requestPid) await Bun.sleep(10);
+		while (app.opened === opened) {
+			if (Date.now() > deadline) throw new Error("Pi did not open a StackScout socket");
+			await Bun.sleep(10);
 		}
+		const processes = Bun.spawnSync(["ps", "-axo", "pid=,ppid=,comm="]);
+		expect(processes.exitCode).toBe(0);
+		const spawned = processes.stdout.toString().trim().split("\n").filter(line => {
+			const [, parent, ...command] = line.trim().split(/\s+/);
+			return Number(parent) === app.child.pid && command.join(" ").endsWith("stackscout");
+		});
+		expect(spawned).toEqual([]);
 		app.child.kill("SIGUSR2");
 		expect((await pending).isError).toBe(true);
-		// The cancelled tool can return before the OS reaps its subprocess (observed on Linux).
-		const stopped = Date.now() + 6000;
-		for (;;) {
-			try { process.kill(requestPid, 0); }
-			catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-				break;
-			}
-			if (Date.now() > stopped) throw new Error("Cancelled StackScout request did not exit");
+		while (app.closed < app.opened) {
+			if (Date.now() > deadline) throw new Error("Cancelled StackScout socket did not close");
 			await Bun.sleep(10);
 		}
 	} finally {

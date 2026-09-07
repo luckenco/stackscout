@@ -247,6 +247,26 @@ fn long_paths_share_ownership_and_recover_stale_fallback_sockets() {
         request(&alias, r#"{"version":1,"op":"status"}"#)["instance"],
         first["instance"]
     );
+    let connected = Command::new(env!("CARGO_BIN_EXE_stackscout"))
+        .arg("connect")
+        .arg(&alias)
+        .output()
+        .unwrap();
+    assert!(connected.status.success());
+    let endpoint: Value = serde_json::from_slice(&connected.stdout).unwrap();
+    assert_eq!(endpoint["root"], first["root"]);
+    assert_eq!(
+        endpoint["socket"],
+        stackscout::service::endpoint(&alias)
+            .unwrap()
+            .1
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        request(&alias, r#"{"version":1,"op":"status"}"#)["files_parsed"],
+        first["files_parsed"]
+    );
     let loser = Command::new(env!("CARGO_BIN_EXE_stackscout"))
         .arg("serve")
         .arg(&alias)
