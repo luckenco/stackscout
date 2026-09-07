@@ -2,6 +2,122 @@ use super::*;
 use crate::Repository;
 
 #[test]
+fn typescript_opaque_bodies_reach_queries_and_reviews_without_inventing_edges() {
+    for body in [
+        "const callback = () => leaf();",
+        "const callback = function() { leaf(); };",
+        "const callback = function*() { leaf(); };",
+        "function nested() { leaf(); }",
+        "function* nested() { leaf(); }",
+        "const object = { method() { leaf(); } };",
+    ] {
+        let mut repo = Repository::new().unwrap();
+        repo.change("main.ts", b"function leaf() {}\nexport function run() {}")
+            .unwrap();
+        let before = repo.snapshot();
+        let source = format!("function leaf() {{}}\nexport function run() {{ {body} }}");
+        repo.change("main.ts", source.as_bytes()).unwrap();
+        let after = repo.snapshot();
+        let output = query::run(
+            &after.graph,
+            query::Request {
+                symbol: "run".into(),
+                depth: None,
+                limit: None,
+            },
+            query::Direction::Callees,
+        )
+        .unwrap();
+        assert!(!output.truncated);
+        assert_eq!(output.calls.len(), 1, "{body}");
+        let call = &output.calls[0];
+        assert_eq!(call.target, "[nested function body omitted]");
+        assert_eq!(call.resolution, "uncertain");
+        assert!(call.callee.is_none());
+        let location = &call.location;
+        assert_eq!((location.start_line, location.end_line), (2, 2));
+        let line = source.lines().nth(1).unwrap();
+        let omitted = &line[location.start_column - 1..location.end_column - 1];
+        assert!(omitted.contains("leaf()"), "{omitted}");
+        assert!(!omitted.contains("export function run"));
+        assert!(after.graph.incoming.is_empty());
+
+        let scope = Scope {
+            symbols: vec!["run".into()],
+            ..Scope::default()
+        };
+        let review = before.review(&after, &scope).unwrap();
+        assert!(!review.truncated);
+        assert_eq!(review.boundaries.len(), 1);
+        let boundary = &review.boundaries[0];
+        assert_eq!(boundary.side, "after");
+        assert_eq!(boundary.call.caller, "ts:main.ts::run");
+        assert_eq!(boundary.call.target, call.target);
+        assert_eq!(boundary.call.resolution, "uncertain");
+        assert_eq!(boundary.call.location, call.location);
+        let diff = before.compare(&after, false, false).unwrap();
+        assert!(diff.contains("[uncertain: [nested function body omitted]]"));
+        assert!(!diff.contains("locally bound"));
+    }
+}
+
+#[test]
+fn typescript_opaque_calls_keep_evaluated_children_and_source_locations() {
+    for (expression, target) in [
+        ("table[key()]()", "[callee table[key()]]"),
+        ("factory()()", "[callee factory()]"),
+        ("new table[key()]()", "[constructor table[key()]]"),
+    ] {
+        let mut repo = Repository::new().unwrap();
+        let source = format!(
+            "function key() {{ return 'item'; }}\nfunction factory() {{ return key; }}\nexport function run(table) {{ {expression}; }}"
+        );
+        repo.change("main.ts", source.as_bytes()).unwrap();
+        let snapshot = repo.snapshot();
+        let output = query::run(
+            &snapshot.graph,
+            query::Request {
+                symbol: "run".into(),
+                depth: Some(1),
+                limit: None,
+            },
+            query::Direction::Callees,
+        )
+        .unwrap();
+        let call = &output.calls[0];
+        assert_eq!(call.target, target);
+        assert_eq!(call.resolution, "uncertain");
+        assert!(call.callee.is_none());
+        let location = &call.location;
+        assert_eq!((location.start_line, location.end_line), (3, 3));
+        let line = source.lines().nth(2).unwrap();
+        assert_eq!(
+            &line[location.start_column - 1..location.end_column - 1],
+            expression
+        );
+        assert_eq!(output.calls.len(), 2);
+        assert_eq!(output.calls[1].resolution, "resolved");
+        let callee = if expression == "factory()()" {
+            "ts:main.ts::factory"
+        } else {
+            "ts:main.ts::key"
+        };
+        assert_eq!(output.calls[1].callee.as_deref(), Some(callee));
+        let scope = Scope {
+            symbols: vec!["run".into()],
+            ..Scope::default()
+        };
+        let review = snapshot.review(&snapshot, &scope).unwrap();
+        assert_eq!(review.boundaries.len(), 2);
+        for boundary in review.boundaries {
+            assert_eq!(boundary.call.target, target);
+            assert_eq!(boundary.call.resolution, "uncertain");
+            assert_eq!(boundary.call.location, call.location);
+        }
+    }
+}
+
+#[test]
 fn dependency_changes_omit_unrelated_edits_and_keep_removed_edges() {
     let mut repo = Repository::new().unwrap();
     repo.change(

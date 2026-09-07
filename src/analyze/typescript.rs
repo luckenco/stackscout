@@ -450,6 +450,10 @@ fn collect_steps(
     output: &mut Vec<LocalStep>,
 ) -> Result<(), AnalyzeError> {
     if is_nested_function(node.kind()) {
+        output.push(LocalStep::Call(CallSite {
+            target: CallTarget::Opaque("[nested function body omitted]".to_owned()),
+            location: range(node),
+        }));
         return Ok(());
     }
 
@@ -540,8 +544,9 @@ fn collect_call(
     let Some(function) = node.child_by_field_name("function") else {
         return Ok(None);
     };
-    let Some(target) = call_target(path, source, function, bindings)? else {
-        return Ok(None);
+    let target = match call_target(path, source, function, bindings)? {
+        Some(target) => target,
+        None => CallTarget::Opaque(format!("[callee {}]", text(path, source, function)?)),
     };
     Ok(Some(CallSite {
         target,
@@ -558,13 +563,15 @@ fn collect_constructor(
     let Some(constructor) = node.child_by_field_name("constructor") else {
         return Ok(None);
     };
-    let Some(parts) = target_parts(path, source, constructor)? else {
-        return Ok(None);
-    };
-    let target = if parts.len() == 1 && bindings.contains(&parts[0]) {
-        CallTarget::Bound(parts[0].clone())
-    } else {
-        CallTarget::Constructor(parts)
+    let target = match target_parts(path, source, constructor)? {
+        Some(parts) if parts.len() == 1 && bindings.contains(&parts[0]) => {
+            CallTarget::Bound(parts[0].clone())
+        }
+        Some(parts) => CallTarget::Constructor(parts),
+        None => CallTarget::Opaque(format!(
+            "[constructor {}]",
+            text(path, source, constructor)?
+        )),
     };
     Ok(Some(CallSite {
         target,
