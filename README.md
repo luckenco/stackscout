@@ -50,6 +50,7 @@ Cancellation closes client requests, not the owner. Truncated output cannot prov
 Tree-sitter supports `.rs`, `.ts`, `.tsx`, `.mts`, `.cts`; declarations and hidden directories are skipped.
 Receivers, generics, globs/re-exports, closures, macros, dynamic/external/generated code may be unresolved
 or omitted. Test/production configurations mix. Missing edges prove nothing: inspect source and run tests.
+See the [Rust coverage audit](docs/rust-coverage.md) for verified gaps and recommended priorities.
 
 ## Checks
 
