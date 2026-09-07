@@ -7,48 +7,48 @@ const MAX_DEPTH: usize = 32;
 const MAX_NODES: usize = 10_000;
 
 // Exact keys: hash collisions are resolved by equality, not treated as equal trees.
-type Fingerprints = HashMap<(String, Option<LocalShape>, Vec<usize>), usize>;
+type Fingerprints<'a> = HashMap<(String, Option<LocalShape<'a>>, Vec<usize>), usize>;
 
 #[derive(Clone, Debug)]
-pub(crate) struct GraphDiff {
-    pub(crate) roots: Vec<RootDiff>,
+pub(crate) struct GraphDiff<'a> {
+    pub(crate) roots: Vec<RootDiff<'a>>,
     /// Symbols with no changed paths reachable in either graph.
     pub(crate) unchanged: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RootDiff {
-    pub(crate) before: Option<TreeNode>,
-    pub(crate) after: Option<TreeNode>,
+pub(crate) struct RootDiff<'a> {
+    pub(crate) before: Option<TreeNode<'a>>,
+    pub(crate) after: Option<TreeNode<'a>>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TreeNode {
+pub(crate) struct TreeNode<'a> {
     pub(crate) identity: String,
     pub(crate) label: String,
     pub(crate) location_file: Option<String>,
     pub(crate) definition_location: Option<SourceRange>,
     pub(crate) call_site_location: Option<SourceRange>,
     pub(crate) hide_when_unchanged: bool,
-    pub(crate) local_shape: Option<LocalShape>,
-    pub(crate) children: Vec<TreeNode>,
+    pub(crate) local_shape: Option<LocalShape<'a>>,
+    pub(crate) children: Vec<TreeNode<'a>>,
     // Assigned together for both sides of a comparison; nodes are immutable afterwards.
     fingerprint: Option<usize>,
 }
 
-impl TreeNode {
+impl<'a> TreeNode<'a> {
     pub(crate) fn fingerprint(&self) -> usize {
         self.fingerprint
             .expect("tree fingerprints must be assigned before comparison")
     }
 
-    fn identify(&mut self, keys: &mut Fingerprints) {
+    fn identify(&mut self, keys: &mut Fingerprints<'a>) {
         for child in &mut self.children {
             child.identify(keys);
         }
         let key = (
             self.identity.clone(),
-            self.local_shape.clone(),
+            self.local_shape,
             self.children.iter().map(Self::fingerprint).collect(),
         );
         let next = keys.len();
@@ -60,7 +60,7 @@ impl TreeNode {
     }
 }
 
-pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
+pub(crate) fn compare<'a>(before: &'a Graph, after: &'a Graph) -> GraphDiff<'a> {
     let keys = before
         .symbols
         .keys()
@@ -128,7 +128,7 @@ pub(crate) fn compare(before: &Graph, after: &Graph) -> GraphDiff {
     }
 }
 
-impl RootDiff {
+impl RootDiff<'_> {
     fn is_changed(&self) -> bool {
         match (&self.before, &self.after) {
             (Some(before), Some(after)) => before.fingerprint() != after.fingerprint(),
@@ -153,12 +153,12 @@ impl RootDiff {
     }
 }
 
-fn root_diff(
-    before: &Graph,
-    after: &Graph,
+fn root_diff<'a>(
+    before: &'a Graph,
+    after: &'a Graph,
     key: &SymbolKey,
-    fingerprints: &mut Fingerprints,
-) -> RootDiff {
+    fingerprints: &mut Fingerprints<'a>,
+) -> RootDiff<'a> {
     let mut root = RootDiff {
         before: tree(before, key),
         after: tree(after, key),
@@ -250,7 +250,7 @@ fn callers_in(
     found
 }
 
-fn tree(graph: &Graph, root: &SymbolKey) -> Option<TreeNode> {
+fn tree<'a>(graph: &'a Graph, root: &SymbolKey) -> Option<TreeNode<'a>> {
     graph.symbols.get(root)?;
     let mut nodes = 0;
     Some(expand(
@@ -263,14 +263,14 @@ fn tree(graph: &Graph, root: &SymbolKey) -> Option<TreeNode> {
     ))
 }
 
-fn expand(
-    graph: &Graph,
+fn expand<'a>(
+    graph: &'a Graph,
     key: &SymbolKey,
     call_site: Option<(&str, &SourceRange)>,
     depth: usize,
     nodes: &mut usize,
     path: &mut BTreeSet<SymbolKey>,
-) -> TreeNode {
+) -> TreeNode<'a> {
     *nodes += 1;
     let node = &graph.symbols[key];
     let mut output = TreeNode {
@@ -299,14 +299,14 @@ fn expand(
     output
 }
 
-fn expand_steps(
-    graph: &Graph,
+fn expand_steps<'a>(
+    graph: &'a Graph,
     steps: &[ResolvedStep],
     file: &str,
     depth: usize,
     nodes: &mut usize,
     path: &mut BTreeSet<SymbolKey>,
-) -> Vec<TreeNode> {
+) -> Vec<TreeNode<'a>> {
     let mut output = Vec::new();
     for step in steps {
         if *nodes >= MAX_NODES {
@@ -423,7 +423,7 @@ fn expand_steps(
     output
 }
 
-fn cycle(key: &SymbolKey, file: &str, location: &SourceRange) -> TreeNode {
+fn cycle(key: &SymbolKey, file: &str, location: &SourceRange) -> TreeNode<'static> {
     TreeNode {
         fingerprint: None,
         identity: key.to_string(),
@@ -437,7 +437,7 @@ fn cycle(key: &SymbolKey, file: &str, location: &SourceRange) -> TreeNode {
     }
 }
 
-fn truncated() -> TreeNode {
+fn truncated() -> TreeNode<'static> {
     TreeNode {
         fingerprint: None,
         identity: "[truncated]".to_owned(),

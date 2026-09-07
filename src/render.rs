@@ -167,10 +167,9 @@ mod tests {
         let mut analyzers = crate::analyze::Analyzers::new().unwrap();
         let before = analyzers.directory(&root.join("before")).unwrap();
         let after = analyzers.directory(&root.join("after")).unwrap();
-        let diff = crate::diff::compare(
-            &crate::build(&before.artifacts).unwrap(),
-            &crate::build(&after.artifacts).unwrap(),
-        );
+        let before = crate::build(&before.artifacts).unwrap();
+        let after = crate::build(&after.artifacts).unwrap();
+        let diff = crate::diff::compare(&before, &after);
         let output = super::render_with_locations(&diff, true);
         assert!(output.contains(" @ \"lib.rs\":2:5-3:13\n"), "{output}");
         assert!(output.contains(" @ \"lib.rs\":2:5-2:27\n"), "{output}");

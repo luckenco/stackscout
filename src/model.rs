@@ -24,7 +24,7 @@ impl Syntax {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(crate) enum Language {
     Rust,
     TypeScript,
@@ -39,7 +39,7 @@ impl fmt::Display for Language {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(crate) struct SymbolKey {
     pub(crate) language: Language,
     pub(crate) file: String,
@@ -66,7 +66,7 @@ pub(crate) struct SourceRange {
     pub(crate) end_column: usize,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(crate) enum CallTarget {
     /// An unqualified call such as `work()`.
     Bare(String),
@@ -185,7 +185,7 @@ pub(crate) struct FileArtifact {
     pub(crate) exports: Vec<ExportBinding>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum Resolution {
     Resolved(SymbolKey),
     Unresolved(CallTarget),
