@@ -133,7 +133,7 @@ pub(crate) struct RustImport {
     pub(crate) path: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum ExportName {
     Named(String),
     Default,
@@ -199,8 +199,14 @@ pub(crate) enum Resolution {
     Resolved(SymbolKey),
     Unresolved(CallTarget),
     Uncertain(CallTarget),
+    /// Search exhausted its work budget; sorted witnesses may omit possible edges.
+    Limited {
+        target: CallTarget,
+        candidates: Vec<SymbolKey>,
+    },
     Ambiguous {
         target: CallTarget,
+        /// Sorted, exhaustive ambiguity candidates.
         candidates: Vec<SymbolKey>,
     },
 }
@@ -211,6 +217,14 @@ impl Resolution {
             Self::Resolved(key) => key.to_string(),
             Self::Unresolved(target) => format!("?{target}"),
             Self::Uncertain(target) => format!("~{target}"),
+            Self::Limited { target, candidates } => format!(
+                "limited:{target}:{}",
+                candidates
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             Self::Ambiguous { target, candidates } => format!(
                 "!{target}:{}",
                 candidates

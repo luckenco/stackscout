@@ -128,54 +128,104 @@ fn render_issues(
         return graph_diff;
     }
 
-    let mut output = String::new();
+    let mut output = render::Output::new();
+    let mut wrote_issue = false;
     for path in omitted {
+        if output.truncated {
+            break;
+        }
         let before = before.iter().find(|issue| issue.path == path.as_str());
         let after = after.iter().find(|issue| issue.path == path.as_str());
-        match (before, after) {
+        let status = match (before, after) {
             (Some(before), Some(after)) if before.same_as(after) => {
-                if diagnostics {
-                    output.push_str(&format!(
-                        "! incomplete (unchanged; omitted from both): {}\n",
-                        before.message()
-                    ));
+                if !diagnostics {
+                    continue;
                 }
+                "unchanged"
             }
             (Some(before), Some(after)) if diagnostics => {
-                output.push_str(&format!(
-                    "! incomplete (changed before; omitted from both): {}\n",
-                    before.message()
-                ));
-                output.push_str(&format!(
-                    "! incomplete (changed after; omitted from both): {}\n",
-                    after.message()
-                ));
+                issue_line(&mut output, "changed before", &before.message());
+                issue_line(&mut output, "changed after", &after.message());
+                wrote_issue = true;
+                continue;
             }
-            (Some(_), Some(_)) => output.push_str(&format!(
-                "! incomplete (changed; omitted from both): {path}\n"
-            )),
-            (Some(before), None) if diagnostics => output.push_str(&format!(
-                "! incomplete (resolved; omitted from both): {}\n",
-                before.message()
-            )),
-            (Some(_), None) => output.push_str(&format!(
-                "! incomplete (resolved; omitted from both): {path}\n"
-            )),
-            (None, Some(after)) if diagnostics => output.push_str(&format!(
-                "! incomplete (introduced; omitted from both): {}\n",
-                after.message()
-            )),
-            (None, Some(_)) => output.push_str(&format!(
-                "! incomplete (introduced; omitted from both): {path}\n"
-            )),
+            (Some(_), Some(_)) => "changed",
+            (Some(_), None) => "resolved",
+            (None, Some(_)) => "introduced",
             (None, None) => unreachable!("an omitted path has an analysis issue"),
+        };
+        if diagnostics {
+            issue_line(&mut output, status, &after.or(before).unwrap().message());
+        } else {
+            issue_line(&mut output, status, path);
         }
+        wrote_issue = true;
     }
-    if !graph_diff.is_empty() {
-        if !output.is_empty() {
+    let graph_truncated = graph_diff.ends_with(render::TRUNCATED);
+    let text = graph_diff
+        .strip_suffix(render::TRUNCATED)
+        .unwrap_or(&graph_diff);
+    if !text.is_empty() {
+        if wrote_issue {
             output.push('\n');
         }
-        output.push_str(&graph_diff);
+        output.push_str(text);
     }
-    output
+    output.finish(graph_truncated)
+}
+
+// Diagnostics are line-oriented too: never let source-derived text forge records.
+fn issue_line(output: &mut render::Output, status: &str, message: &str) {
+    use std::fmt::Write;
+    let _ = write!(output, "! incomplete ({status}; omitted from both): ");
+    if message.chars().any(char::is_control) {
+        let _ = writeln!(output, "{message:?}");
+    } else {
+        let _ = writeln!(output, "{message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn diagnostics_escape_source_text_and_bound_combined_output() {
+        let path = "bad\n+ forged\u{1b}[2J.rs";
+        let issue = crate::analyze::Issue::new(
+            path.to_owned(),
+            crate::analyze::AnalyzeError::Unsupported {
+                path: path.to_owned(),
+                message: "bad\r\n- forged\t".to_owned(),
+            },
+        );
+        for diagnostics in [false, true] {
+            let output = super::render_issues(
+                &[],
+                &[&issue],
+                &super::BTreeSet::from([path.to_owned()]),
+                String::new(),
+                diagnostics,
+            );
+            assert_eq!(output.lines().count(), 1, "{output:?}");
+            assert!(
+                !output.trim_end().chars().any(char::is_control),
+                "{output:?}"
+            );
+        }
+        let issues = (0..2_000)
+            .map(|i| {
+                let path = format!("file{i:04}.rs");
+                crate::analyze::Issue::new(
+                    path.clone(),
+                    crate::analyze::AnalyzeError::Syntax { path, line: 1 },
+                )
+            })
+            .collect::<Vec<_>>();
+        let omitted = issues.iter().map(|issue| issue.path.clone()).collect();
+        let refs = issues.iter().collect::<Vec<_>>();
+        let graph_diff = format!("{}{}", "x".repeat(48 * 1024), crate::render::TRUNCATED);
+        let output = super::render_issues(&[], &refs, &omitted, graph_diff, true);
+        assert!(output.len() <= 48 * 1024 + crate::render::TRUNCATED.len());
+        assert_eq!(output.matches(crate::render::TRUNCATED).count(), 1);
+        assert!(output.ends_with(crate::render::TRUNCATED));
+    }
 }

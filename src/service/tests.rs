@@ -100,6 +100,76 @@ fn diff_cache_bounds_payloads_without_pinning_graphs_or_caching_health() {
 }
 
 #[test]
+fn limited_resolution_marks_small_and_cached_diffs_incomplete() {
+    let directory = tempfile::tempdir().unwrap();
+    let shared = Shared {
+        root: directory.path().to_owned(),
+        instance: "test".to_owned(),
+        state: Mutex::new(State::default()),
+        watch: Arc::new(Mutex::new(watch::Pending::default())),
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let mut repo = Repository::new().unwrap();
+    fs::write(shared.root.join("dep.ts"), "export function work() {}").unwrap();
+    assert!(refresh(&shared, &mut repo, &pool, None).error.is_none());
+    query(
+        &shared,
+        Operation::Checkpoint {
+            name: "before".to_owned(),
+        },
+    );
+    let source = format!(
+        "{}export function run() {{ work(); }}",
+        "import {work} from './dep';\n".repeat(100)
+    );
+    fs::write(shared.root.join("api.ts"), &source).unwrap();
+    assert!(refresh(&shared, &mut repo, &pool, None).error.is_none());
+    for _ in 0..2 {
+        let response = query(
+            &shared,
+            Operation::Diff {
+                name: "before".to_owned(),
+                diagnostics: false,
+            },
+        );
+        assert!(response.error.is_none());
+        assert!(response.truncated);
+        let text = response.diff.unwrap();
+        assert!(text.len() < protocol::MAX_DIFF);
+        assert!(text.contains("[limited:"), "{text}");
+        assert!(text.ends_with(crate::render::TRUNCATED));
+    }
+    // Identical snapshots must not hide the warning that candidate edges were omitted.
+    repo.checkpoint("limited");
+    assert_eq!(repo.diff("limited").unwrap(), crate::render::TRUNCATED);
+    query(
+        &shared,
+        Operation::Checkpoint {
+            name: "same".to_owned(),
+        },
+    );
+    let response = query(
+        &shared,
+        Operation::Diff {
+            name: "same".to_owned(),
+            diagnostics: false,
+        },
+    );
+    assert!(response.truncated);
+    assert_eq!(response.diff.as_deref(), Some(crate::render::TRUNCATED));
+    #[cfg(unix)]
+    {
+        fs::write(shared.root.join("bad\n+ forged.rs"), "fn broken(").unwrap();
+        let response = refresh(&shared, &mut repo, &pool, None);
+        assert!(response.error.is_some());
+        assert!(!response.error.unwrap().chars().any(char::is_control));
+    }
+}
+
+#[test]
 fn parallel_scans_match_every_fixture_in_both_directions() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
     for threads in [1, 4] {

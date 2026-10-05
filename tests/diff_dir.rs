@@ -281,6 +281,43 @@ fn malformed_files_are_reported_and_omitted_from_both_sides() {
 }
 
 #[test]
+#[cfg(unix)]
+fn control_characters_in_source_filenames_cannot_forge_output() {
+    for name in [
+        "bad\n+ forged.rs",
+        "bad\r.ts",
+        "bad\u{1b}[2J.rs",
+        "bad\t.rs",
+    ] {
+        let before = tempfile::tempdir().unwrap();
+        let after = tempfile::tempdir().unwrap();
+        fs::write(after.path().join(name), "fn broken(").unwrap();
+        for diagnostics in [false, true] {
+            let error = if diagnostics {
+                stackscout::diff_dirs_with_diagnostics(before.path(), after.path())
+            } else {
+                stackscout::diff_dirs(before.path(), after.path())
+            }
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("normalized repository-relative source path"));
+            assert!(!error.chars().any(char::is_control), "{error:?}");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_stackscout"))
+            .arg("diff-dir")
+            .arg(before.path())
+            .arg(after.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(error.lines().count(), 1, "{error:?}");
+        assert!(!error.trim_end().chars().any(char::is_control), "{error:?}");
+    }
+}
+
+#[test]
 fn unchanged_diagnostics_are_hidden_by_default() {
     assert_eq!(fixture("unchanged-incomplete"), "");
 }

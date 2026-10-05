@@ -180,11 +180,12 @@ fn query(shared: &Shared, operation: Operation) -> Response {
                 .compare(&current.snapshot, diagnostics, true)
             {
                 Ok(mut output) => {
-                    response.truncated = output.lines().any(|line| {
-                        line.get(2..)
-                            .is_some_and(|text| text.trim() == "[truncated]")
-                    });
-                    if output.len() > protocol::MAX_DIFF {
+                    response.truncated = output.ends_with(crate::render::TRUNCATED)
+                        || output.lines().any(|line| {
+                            line.get(2..)
+                                .is_some_and(|text| text.trim() == "[truncated]")
+                        });
+                    if output.len() > protocol::MAX_DIFF + crate::render::TRUNCATED.len() {
                         let mut end = protocol::MAX_DIFF;
                         while !output.is_char_boundary(end) {
                             end -= 1;

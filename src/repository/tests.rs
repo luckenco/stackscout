@@ -411,9 +411,22 @@ fn invalid_inputs_and_graph_errors_leave_state_unchanged() {
         "lib.d.ts",
         "lib.d.mts",
         "lib.d.cts",
+        "line\nbreak.rs",
+        "return\rcarriage.ts",
+        "escape\u{1b}[2J.rs",
+        "tab\tname.rs",
+        "delete\u{7f}.rs",
+        "control\u{85}.tsx",
     ] {
-        assert!(repo.change(path, original).is_err(), "{path}");
-        assert!(repo.delete(path).is_err(), "{path}");
+        for error in [
+            repo.change(path, original).unwrap_err(),
+            repo.delete(path).unwrap_err(),
+        ] {
+            assert!(
+                !error.to_string().chars().any(char::is_control),
+                "{error:?}"
+            );
+        }
     }
     assert!(repo.change("lib.rs", &[0xff]).is_err());
     assert!(repo.analyzers.parsed.is_empty());

@@ -2,7 +2,7 @@
 mod bench;
 mod rust;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 use crate::model::{
@@ -17,6 +17,8 @@ use crate::model::{
 struct Index<'a> {
     files: BTreeMap<(Language, &'a str, &'a [String]), Vec<&'a SymbolKey>>,
     rust: BTreeMap<Vec<String>, Vec<&'a SymbolKey>>,
+    imports: HashMap<(&'a str, &'a str), Vec<&'a Import>>,
+    exports: HashMap<(&'a str, &'a ExportName), Vec<&'a ExportBinding>>,
 }
 
 impl<'a> Index<'a> {
@@ -38,21 +40,64 @@ impl<'a> Index<'a> {
         index
     }
 
-    fn file(
-        &self,
-        language: Language,
-        file: &str,
-        qualified: &[String],
-        output: &mut BTreeSet<SymbolKey>,
-    ) {
-        output.extend(
-            self.files
-                .get(&(language, file, qualified))
-                .into_iter()
-                .flatten()
-                .copied()
-                .cloned(),
-        );
+    fn imports<'b>(&'b self, file: &'b str, local: &'b str) -> &'b [&'b Import] {
+        self.imports
+            .get(&(file, local))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn file(&self, language: Language, file: &str, qualified: &[String], output: &mut Candidates) {
+        for key in self
+            .files
+            .get(&(language, file, qualified))
+            .into_iter()
+            .flatten()
+        {
+            if !output.spend() {
+                break;
+            }
+            output.keys.insert((*key).clone());
+        }
+    }
+}
+
+// A per-call bound also bounds retained keys and graph/shape work downstream.
+// Charge matching walks, including duplicate bindings; unrelated bindings are indexed once.
+const TYPESCRIPT_WORK_LIMIT: usize = 256;
+
+struct Candidates {
+    keys: BTreeSet<SymbolKey>,
+    remaining: usize,
+    limited: bool,
+}
+
+impl Candidates {
+    fn new() -> Self {
+        Self {
+            keys: BTreeSet::new(),
+            remaining: TYPESCRIPT_WORK_LIMIT,
+            limited: false,
+        }
+    }
+
+    fn spend(&mut self) -> bool {
+        if self.remaining == 0 {
+            self.limited = true;
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+
+    fn finish(self, target: &CallTarget) -> Resolution {
+        if self.limited {
+            return Resolution::Limited {
+                target: target.clone(),
+                candidates: self.keys.into_iter().collect(),
+            };
+        }
+        resolution(target, self.keys)
     }
 }
 
@@ -60,18 +105,30 @@ pub(crate) fn program<'a>(
     artifacts: impl IntoIterator<Item = &'a FileArtifact>,
 ) -> ResolvedProgram {
     let artifacts = artifacts.into_iter().collect::<Vec<_>>();
-    let all_symbols = Index::new(artifacts.iter().flat_map(|artifact| &artifact.symbols));
-    let exports = artifacts
-        .iter()
-        .map(|artifact| (artifact.path.as_str(), artifact.exports.as_slice()))
-        .collect::<BTreeMap<_, _>>();
+    let mut all_symbols = Index::new(artifacts.iter().flat_map(|artifact| &artifact.symbols));
+    for artifact in &artifacts {
+        for import in &artifact.imports {
+            all_symbols
+                .imports
+                .entry((&artifact.path, &import.local))
+                .or_default()
+                .push(import);
+        }
+        for binding in &artifact.exports {
+            all_symbols
+                .exports
+                .entry((&artifact.path, &binding.exported))
+                .or_default()
+                .push(binding);
+        }
+    }
 
     let mut symbols = Vec::new();
     for artifact in &artifacts {
         for symbol in &artifact.symbols {
             symbols.push(ResolvedSymbol {
                 symbol: symbol.clone(),
-                steps: resolve_steps(&symbol.steps, symbol, artifact, &exports, &all_symbols),
+                steps: resolve_steps(&symbol.steps, symbol, artifact, &all_symbols),
             });
         }
     }
@@ -83,21 +140,13 @@ fn resolve_steps(
     steps: &[LocalStep],
     caller: &LocalSymbol,
     artifact: &FileArtifact,
-    exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &Index<'_>,
 ) -> Vec<ResolvedStep> {
     steps
         .iter()
         .map(|step| match step {
             LocalStep::Call(call) => ResolvedStep::Call(ResolvedCall {
-                resolution: target(
-                    caller,
-                    &call.target,
-                    &call.location,
-                    artifact,
-                    exports,
-                    symbols,
-                ),
+                resolution: target(caller, &call.target, &call.location, artifact, symbols),
                 location: call.location.clone(),
             }),
             LocalStep::Branch {
@@ -109,7 +158,7 @@ fn resolve_steps(
                 key: key.clone(),
                 label: label.clone(),
                 location: location.clone(),
-                children: resolve_steps(children, caller, artifact, exports, symbols),
+                children: resolve_steps(children, caller, artifact, symbols),
             },
         })
         .collect()
@@ -120,14 +169,12 @@ fn target(
     target: &CallTarget,
     location: &SourceRange,
     artifact: &FileArtifact,
-    exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &Index<'_>,
 ) -> Resolution {
     if artifact.language == Language::Rust {
         return rust::resolve(caller, target, location, &artifact.rust_imports, symbols);
     }
-    let imports = &artifact.imports;
-    let mut candidates = BTreeSet::new();
+    let mut candidates = Candidates::new();
     match target {
         CallTarget::Bare(name) => {
             same_file(
@@ -136,14 +183,16 @@ fn target(
                 symbols,
                 &mut candidates,
             );
-            for import in imports.iter().filter(|import| import.local == *name) {
+            for import in symbols.imports(&artifact.path, name) {
+                if !candidates.spend() {
+                    break;
+                }
                 match &import.target {
                     ImportTarget::Named(imported) => imported_symbol(
                         &caller.key,
                         import,
                         &ExportName::Named(imported.clone()),
                         &[],
-                        exports,
                         symbols,
                         &mut candidates,
                     ),
@@ -152,7 +201,6 @@ fn target(
                         import,
                         &ExportName::Default,
                         &[],
-                        exports,
                         symbols,
                         &mut candidates,
                     ),
@@ -179,14 +227,16 @@ fn target(
                 same_file(&caller.key, path, symbols, &mut candidates);
             }
             if let Some((local, rest)) = path.split_first() {
-                for import in imports.iter().filter(|import| import.local == *local) {
+                for import in symbols.imports(&artifact.path, local) {
+                    if !candidates.spend() {
+                        break;
+                    }
                     match &import.target {
                         ImportTarget::Named(exported) => imported_symbol(
                             &caller.key,
                             import,
                             &ExportName::Named(exported.clone()),
                             &static_suffix(rest),
-                            exports,
                             symbols,
                             &mut candidates,
                         ),
@@ -195,7 +245,6 @@ fn target(
                             import,
                             &ExportName::Default,
                             &static_suffix(rest),
-                            exports,
                             symbols,
                             &mut candidates,
                         ),
@@ -206,7 +255,6 @@ fn target(
                                     import,
                                     &ExportName::Named(exported.clone()),
                                     &static_suffix(rest),
-                                    exports,
                                     symbols,
                                     &mut candidates,
                                 );
@@ -221,7 +269,10 @@ fn target(
             qualified.push("constructor".to_owned());
             same_file(&caller.key, &qualified, symbols, &mut candidates);
             if let Some((local, rest)) = path.split_first() {
-                for import in imports.iter().filter(|import| import.local == *local) {
+                for import in symbols.imports(&artifact.path, local) {
+                    if !candidates.spend() {
+                        break;
+                    }
                     match &import.target {
                         ImportTarget::Named(imported) => {
                             let mut suffix = rest.to_vec();
@@ -231,7 +282,6 @@ fn target(
                                 import,
                                 &ExportName::Named(imported.clone()),
                                 &suffix,
-                                exports,
                                 symbols,
                                 &mut candidates,
                             );
@@ -245,7 +295,6 @@ fn target(
                                     import,
                                     &ExportName::Named(exported.clone()),
                                     &suffix,
-                                    exports,
                                     symbols,
                                     &mut candidates,
                                 );
@@ -256,7 +305,6 @@ fn target(
                             import,
                             &ExportName::Default,
                             &["constructor".to_owned()],
-                            exports,
                             symbols,
                             &mut candidates,
                         ),
@@ -267,7 +315,7 @@ fn target(
         }
     }
 
-    resolution(target, candidates)
+    candidates.finish(target)
 }
 
 fn resolution(target: &CallTarget, mut candidates: BTreeSet<SymbolKey>) -> Resolution {
@@ -285,7 +333,7 @@ fn same_file(
     caller: &SymbolKey,
     qualified: &[String],
     symbols: &Index<'_>,
-    output: &mut BTreeSet<SymbolKey>,
+    output: &mut Candidates,
 ) {
     symbols.file(caller.language, &caller.file, qualified, output);
 }
@@ -303,18 +351,20 @@ fn imported_symbol(
     import: &Import,
     exported: &ExportName,
     suffix: &[String],
-    exports: &BTreeMap<&str, &[ExportBinding]>,
     symbols: &Index<'_>,
-    output: &mut BTreeSet<SymbolKey>,
+    output: &mut Candidates,
 ) {
     for file in import_files(&caller.file, &import.source) {
-        let Some(bindings) = exports.get(file.as_str()) else {
+        if !output.spend() {
+            return;
+        }
+        let Some(bindings) = symbols.exports.get(&(file.as_str(), exported)) else {
             continue;
         };
-        for binding in bindings
-            .iter()
-            .filter(|binding| binding.exported == *exported)
-        {
+        for binding in bindings {
+            if !output.spend() {
+                return;
+            }
             let mut qualified = vec![binding.local.clone()];
             qualified.extend_from_slice(suffix);
             symbols.file(caller.language, &file, &qualified, output);

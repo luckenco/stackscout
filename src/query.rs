@@ -42,6 +42,8 @@ pub(crate) struct Call {
     pub(crate) callee: Option<String>,
     pub(crate) target: String,
     pub(crate) resolution: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) candidates: Option<Vec<String>>,
     pub(crate) location: model::SourceRange,
 }
 
@@ -134,8 +136,10 @@ pub(crate) fn run(
     let mut output = Output {
         symbols: Vec::new(),
         calls: Vec::new(),
-        truncated: false,
-        warning: "Syntactic graph only: ambiguous edges are possible calls; unresolved, dynamic, or omitted calls may hide additional paths. Inspect analysis issues and watcher health.",
+        // A missing witness need not be reachable through retained incoming edges.
+        // Conservatively flag all callers/impact queries when any search was limited.
+        truncated: incoming && graph.limited,
+        warning: "Syntactic graph only: ambiguous/limited edges are possible calls; limited searches may omit candidates. Callers/impact are truncated if any graph call is limited, even outside the visited component. Unresolved, dynamic, or omitted calls may hide additional paths. Inspect analysis issues and watcher health.",
     };
     let mut bytes = 48 * 1024 - 512;
     let mut work = 20_000usize;
@@ -156,7 +160,7 @@ pub(crate) fn run(
     }
     output.symbols.push(symbol);
     'walk: while let Some((current, depth)) = queue.pop_front() {
-        // Incoming adjacency already includes ambiguous candidates, but never guesses unresolved calls.
+        // Incoming adjacency includes ambiguous and limited witnesses, never guessed edges.
         let callers: Box<dyn Iterator<Item = &model::SymbolKey>> = if incoming {
             Box::new(graph.incoming.get(current).into_iter().flatten())
         } else {
@@ -188,6 +192,10 @@ pub(crate) fn run(
                         }
                         model::Resolution::Ambiguous { target, candidates } => {
                             ("ambiguous", candidates, target.to_string())
+                        }
+                        model::Resolution::Limited { target, candidates } => {
+                            output.truncated = true;
+                            ("limited", candidates, target.to_string())
                         }
                         model::Resolution::Unresolved(target) => {
                             ("unresolved", &[], target.to_string())
@@ -255,6 +263,11 @@ pub(crate) fn run(
                         callee: callee.map(ToString::to_string),
                         target: target.clone(),
                         resolution,
+                        candidates: if resolution == "limited" {
+                            Some(candidates.iter().map(ToString::to_string).collect())
+                        } else {
+                            None
+                        },
                         location: call.location.clone(),
                     };
                     if !fits(&edge, &mut bytes) {

@@ -13,6 +13,7 @@ target/debug/stackscout diff-dir <before-directory> <after-directory>
 
 `~` marks local changes; `+`/`-` mark added/removed call paths, not necessarily implementations.
 Failed-analysis files are omitted from both sides; `--diagnostics` includes unchanged failures.
+Diff expansion and output are bounded; truncation explicitly marks incomplete evidence.
 
 ## Repository service
 

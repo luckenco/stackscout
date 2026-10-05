@@ -23,7 +23,7 @@ pub(crate) struct File {
 /// An in-memory repository updated exclusively with caller-supplied source bytes.
 ///
 /// Paths must be normalized, repository-relative UTF-8 paths using `/`, without
-/// empty, `.` or `..` components, backslashes, or colons. Unsupported extensions
+/// empty, `.` or `..` components, backslashes, colons, or control characters. Unsupported extensions
 /// and declaration-only TypeScript files are rejected. No method reads files.
 /// Updates reparse only the changed file, then rebuild resolution and all graph
 /// edges from cached artifacts. Checkpoints share immutable artifacts, diagnostics and graph.
@@ -162,13 +162,16 @@ impl Repository {
 }
 
 pub(crate) fn source_path(path: &str) -> Result<model::Syntax, Error> {
-    if path.contains(['\\', ':']) || path.split('/').any(|part| matches!(part, "" | "." | "..")) {
+    if path.chars().any(char::is_control)
+        || path.contains(['\\', ':'])
+        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+    {
         return Err(Error {
-            message: format!("expected a normalized repository-relative source path: {path}"),
+            message: format!("expected a normalized repository-relative source path: {path:?}"),
         });
     }
     model::Syntax::for_path(Path::new(path)).ok_or_else(|| Error {
-        message: format!("unsupported source path: {path}"),
+        message: format!("unsupported source path: {path:?}"),
     })
 }
 
@@ -239,7 +242,7 @@ impl Snapshot {
         locations: bool,
     ) -> Result<String, Error> {
         let unchanged = Arc::ptr_eq(&self.graph, &after.graph);
-        if unchanged && !diagnostics {
+        if unchanged && !diagnostics && !self.graph.limited {
             return Ok(String::new());
         }
         let before_issues = self
@@ -259,11 +262,15 @@ impl Snapshot {
             .collect::<BTreeSet<_>>();
         // Identical publications need no graph walk, but unchanged diagnostics still matter.
         if unchanged {
+            let mut graph_diff = String::new();
+            if self.graph.limited {
+                graph_diff.push_str(render::TRUNCATED);
+            }
             return Ok(crate::render_issues(
                 &before_issues,
                 &after_issues,
                 &omitted,
-                String::new(),
+                graph_diff,
                 diagnostics,
             ));
         }

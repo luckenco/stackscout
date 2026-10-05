@@ -820,7 +820,7 @@ fn protocol_errors_and_output_limits_are_explicit() {
         diff["diff"]
             .as_str()
             .unwrap()
-            .ends_with("[truncated: diff exceeds 48 KiB]\n")
+            .ends_with("[truncated: diff output incomplete]\n")
     );
     assert_eq!(
         request(

@@ -49,6 +49,8 @@ impl GraphNode {
 pub(crate) struct Graph {
     pub(crate) symbols: BTreeMap<SymbolKey, GraphNode>,
     pub(crate) incoming: BTreeMap<SymbolKey, BTreeSet<SymbolKey>>,
+    /// Missing witnesses can hide callers anywhere, including disconnected components.
+    pub(crate) limited: bool,
 }
 
 #[derive(Debug, Error)]
@@ -72,17 +74,23 @@ pub(crate) fn build(program: ResolvedProgram) -> Result<Graph, GraphError> {
         }
     }
 
+    let mut limited = false;
     for (caller, node) in &symbols {
-        add_incoming(caller, &node.steps, &mut incoming);
+        add_incoming(caller, &node.steps, &mut incoming, &mut limited);
     }
 
-    Ok(Graph { symbols, incoming })
+    Ok(Graph {
+        symbols,
+        incoming,
+        limited,
+    })
 }
 
 fn add_incoming(
     caller: &SymbolKey,
     steps: &[ResolvedStep],
     incoming: &mut BTreeMap<SymbolKey, BTreeSet<SymbolKey>>,
+    limited: &mut bool,
 ) {
     for step in steps {
         match step {
@@ -93,7 +101,9 @@ fn add_incoming(
                         .or_default()
                         .insert(caller.clone());
                 }
-                Resolution::Ambiguous { candidates, .. } => {
+                Resolution::Ambiguous { candidates, .. }
+                | Resolution::Limited { candidates, .. } => {
+                    *limited |= matches!(call.resolution, Resolution::Limited { .. });
                     for callee in candidates {
                         incoming
                             .entry(callee.clone())
@@ -103,7 +113,9 @@ fn add_incoming(
                 }
                 Resolution::Unresolved(_) | Resolution::Uncertain(_) => {}
             },
-            ResolvedStep::Branch { children, .. } => add_incoming(caller, children, incoming),
+            ResolvedStep::Branch { children, .. } => {
+                add_incoming(caller, children, incoming, limited)
+            }
         }
     }
 }
