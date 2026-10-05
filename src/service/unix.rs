@@ -18,6 +18,62 @@ fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+// Filesystem mode checks are defense in depth: ACLs can grant access despite them.
+// Authenticate the connected peer before reading requests or sending source evidence.
+fn check_peer(stream: &UnixStream, expected: u32) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let peer = {
+        let mut credentials = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
+        // SAFETY: the descriptor is live and both output buffers have the declared sizes.
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut length,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length as usize != std::mem::size_of_val(&credentials) {
+            return Err(io::Error::other("invalid peer credentials"));
+        }
+        credentials.uid
+    };
+    #[cfg(target_os = "macos")]
+    let peer = {
+        let mut user = 0;
+        let mut group = 0;
+        // SAFETY: the descriptor is live and the uid/gid outputs are valid pointers.
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut user, &mut group) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        user
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let peer: u32 = {
+        let _ = (stream, expected);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "peer authentication requires Linux or macOS",
+        ));
+    };
+    if peer != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "service peer must have the owner's effective uid",
+        ));
+    }
+    Ok(())
+}
+
 fn paths(root: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let root = root.canonicalize()?;
     if !root.is_dir() {
@@ -280,6 +336,9 @@ fn ingress(
         for _ in 0..32 {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    if check_peer(&stream, uid()).is_err() {
+                        continue; // Fail closed, without responding or admitting a client frame.
+                    }
                     stream.set_nonblocking(true)?;
                     if clients.len() == 64 {
                         clients.pop_front().unwrap().unregister(poll.registry())?;
@@ -432,6 +491,7 @@ pub fn request(root: &Path, json: &str) -> io::Result<String> {
     }
     let (root, socket) = endpoint(root)?;
     let mut stream = UnixStream::connect(socket)?;
+    check_peer(&stream, uid())?;
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(json.as_bytes())?;
@@ -461,6 +521,24 @@ pub fn request(root: &Path, json: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connected_peers_require_the_expected_uid() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("service.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let client = UnixStream::connect(&socket).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        for stream in [&client, &server] {
+            check_peer(stream, uid()).unwrap();
+            assert_eq!(
+                check_peer(stream, uid().wrapping_add(1))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied,
+            );
+        }
+    }
 
     #[test]
     fn publication_recovers_staged_sockets_and_accepts_on_the_final_path() {
