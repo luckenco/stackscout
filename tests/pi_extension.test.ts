@@ -224,6 +224,25 @@ test("owner restart invalidates only baseline, not current graph queries", async
 	expect(app.calls.filter((call) => call.op === "checkpoint")).toHaveLength(1);
 });
 
+test("failed restart recovery retries the rescan", async () => {
+	let restarted = false;
+	let broken = true;
+	const app = harness((op) => ({
+		instance: restarted ? "owner-2" : "owner-1",
+		error: restarted && broken && op.op === "rescan" ? "rescan failed" : null,
+	}));
+	await app.start();
+	restarted = true;
+	await expect(app.run("call_graph", { action: "callers", symbol: "run" })).rejects.toThrow("rescan failed");
+	broken = false;
+	const start = app.calls.length;
+	await app.run("call_graph", { action: "callers", symbol: "run" });
+	expect(app.calls.slice(start).map((call) => call.op)).toEqual(["rescan", "rescan", "callers"]);
+	const next = app.calls.length;
+	await app.run("call_graph", { action: "callers", symbol: "run" });
+	expect(app.calls.slice(next).map((call) => call.op)).toEqual(["sync", "callers"]);
+});
+
 test("a restart between the barrier and query is rejected", async () => {
 	const app = harness((op) => ({ instance: op.op === "diff" ? "owner-2" : "owner-1" }));
 	await app.start();
@@ -311,6 +330,18 @@ test.each(["read failed", ""])("failed sync is visible and requires recovery eve
 	expect(app.calls.slice(start).map((call) => call.op)).toEqual(["rescan", "diff"]);
 });
 
+test("failed explicit refresh retries a full rescan", async () => {
+	let broken = false;
+	const app = harness((op) => ({ error: broken && op.op === "rescan" ? "reconciliation uncertain" : null }));
+	await app.start();
+	broken = true;
+	await expect(app.run("call_graph_diff", { refresh: true })).rejects.toThrow("reconciliation uncertain");
+	broken = false;
+	const start = app.calls.length;
+	await app.run();
+	expect(app.calls.slice(start).map((call) => call.op)).toEqual(["rescan", "diff"]);
+});
+
 test("failed writes/non-source writes are skipped; ignore changes rescan; aliases sync their target", async () => {
 	const app = harness();
 	await app.start();
@@ -360,6 +391,36 @@ test("cancelling a waiting query does not cancel a saved-write acknowledgement",
 	gate.resolve();
 	await write;
 	await app.run();
+});
+
+test("cancelled query barrier does not force a full rescan", async () => {
+	const controller = new AbortController();
+	let cancel = false;
+	const app = harness((op) => {
+		if (cancel && op.op === "sync" && op.paths?.length === 0) {
+			cancel = false;
+			controller.abort(new Error("query cancelled"));
+		}
+		return {};
+	});
+	await app.start();
+	cancel = true;
+	await expect(app.run("call_graph_diff", {}, controller.signal)).rejects.toThrow("query cancelled");
+	const start = app.calls.length;
+	await app.run();
+	expect(app.calls.slice(start).map((call) => call.op)).toEqual(["sync", "diff"]);
+});
+
+test("rejected query barrier does not force a full rescan", async () => {
+	let reject = false;
+	const app = harness((op) => ({ error: reject && op.op === "sync" && op.paths?.length === 0 ? "update queue unavailable" : null }));
+	await app.start();
+	reject = true;
+	await expect(app.run()).rejects.toThrow("update queue unavailable");
+	reject = false;
+	const start = app.calls.length;
+	await app.run();
+	expect(app.calls.slice(start).map((call) => call.op)).toEqual(["sync", "diff"]);
 });
 
 test("cancellation after request takes precedence over protocol errors", async () => {

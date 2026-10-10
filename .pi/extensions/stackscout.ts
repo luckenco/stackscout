@@ -92,14 +92,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// All synchronization state changes run in this queue. Graph traversal stays concurrent.
-	function enqueue<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	function enqueue<T>(action: () => Promise<T>, signal?: AbortSignal, rescanOnFailure = true): Promise<T> {
 		const result = updates.then(async () => {
 			lifetime.signal.throwIfAborted();
 			signal?.throwIfAborted();
 			try {
 				return await action();
 			} catch (error) {
-				needsRescan = true;
+				if (rescanOnFailure) needsRescan = true;
 				throw error;
 			}
 		});
@@ -113,6 +113,7 @@ export default function (pi: ExtensionAPI) {
 		if (paths === undefined || needsRescan || !acknowledged) operation = { op: "rescan" };
 		let response = await send(ctx, operation, signal);
 		if (acknowledged && acknowledged.instance !== response.instance) {
+			needsRescan = true;
 			response = await send(ctx, { op: "rescan" }, signal);
 		}
 		if (acknowledged?.instance === response.instance) checkGeneration(response, acknowledged);
@@ -124,7 +125,7 @@ export default function (pi: ExtensionAPI) {
 	function prepare(ctx: ExtensionContext, signal?: AbortSignal, refresh = false) {
 		let paths: string[] | undefined = [];
 		if (refresh) paths = undefined;
-		return enqueue(() => sync(ctx, paths, signal), signal);
+		return enqueue(() => sync(ctx, paths, signal), signal, refresh);
 	}
 
 	async function compare(ctx: ExtensionContext, expected: Generation, diagnostics?: boolean, signal?: AbortSignal) {
