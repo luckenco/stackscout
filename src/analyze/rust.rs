@@ -20,16 +20,52 @@ pub(super) fn extract(
         symbols: Vec::new(),
         imports: Vec::new(),
         rust_imports: Vec::new(),
+        rust_modules: Vec::new(),
         exports: Vec::new(),
         unsupported: Default::default(),
     };
     imports(path, source, root, &[], root, &mut artifact.rust_imports)?;
+    modules(path, source, root, &[], &mut artifact.rust_modules)?;
     definitions(path, source, root, &[], &[], &[], &mut artifact)?;
     unsupported(path, source, root, &mut artifact.unsupported)?;
     for shapes in artifact.unsupported.values_mut() {
         shapes.sort();
     }
     Ok(artifact)
+}
+
+fn modules(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    current: &[String],
+    output: &mut Vec<(Vec<String>, String)>,
+) -> Result<(), AnalyzeError> {
+    if node.kind() == "mod_item" {
+        let name = required_field(path, source, node, "name")?.to_owned();
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut nested = current.to_vec();
+            nested.push(name);
+            return modules(path, source, body, &nested, output);
+        }
+        // `#[path]` and macro-expanded declarations need separate handling.
+        if node.prev_named_sibling().is_some_and(|previous| {
+            previous.kind() == "attribute_item"
+                && text(path, source, previous).is_ok_and(|value| {
+                    value.trim_start().starts_with("#[path")
+                        || value.trim_start().starts_with("#[cfg_attr")
+                })
+        }) {
+            return Ok(());
+        }
+        output.push((current.to_vec(), name));
+        return Ok(());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        modules(path, source, child, current, output)?;
+    }
+    Ok(())
 }
 
 fn unsupported(

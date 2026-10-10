@@ -25,6 +25,7 @@ pub(super) fn extract(
         symbols: Vec::new(),
         imports: Vec::new(),
         rust_imports: Vec::new(),
+        rust_modules: Vec::new(),
         exports: Vec::new(),
         unsupported: Default::default(),
     };

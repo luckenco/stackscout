@@ -200,6 +200,8 @@ pub(crate) struct FileArtifact {
     pub(crate) symbols: Vec<LocalSymbol>,
     pub(crate) imports: Vec<Import>,
     pub(crate) rust_imports: Vec<RustImport>,
+    /// File modules declared with `mod name;`, including their inline module prefixes.
+    pub(crate) rust_modules: Vec<(Vec<String>, String)>,
     pub(crate) exports: Vec<ExportBinding>,
     /// Non-callable Rust item shapes, grouped by unsupported impact category.
     pub(crate) unsupported: std::collections::BTreeMap<&'static str, Vec<String>>,

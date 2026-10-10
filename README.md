@@ -56,10 +56,13 @@ Tree-sitter supports `.rs`, `.ts`, `.tsx`, `.mts`, `.cts`; declarations and hidd
 Only direct Rust receivers with plain explicit nominal annotations are resolved; inferred, generic,
 trait, or chained dispatch and globs/re-exports, closures, macros, dynamic/external/generated code
 may be unresolved or omitted. Conventional `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`
-roots are isolated by path, not Cargo metadata. With multiple roots, sibling `src/*.rs`
-files have unknown target ownership, so calls to and from them resolve only within their
-own file. Custom target paths, `#[path]` modules, shared modules, cross-crate imports, and
-Cargo manifest changes are not modeled. Test/production configurations mix. Missing edges prove
+roots, including `src/bin/<name>/main.rs`, are isolated by path, not Cargo metadata.
+Explicit `mod name;` declarations assign file modules to one conventional root; a module
+claimed by multiple roots stays isolated, since symbols have no target-qualified identity.
+With multiple roots, undeclared sibling files also have unknown target ownership.
+With a single root, undeclared files retain the existing path-based fallback.
+Custom manifest target paths, `#[path]` modules, cross-crate imports, and Cargo manifest
+changes are not modeled. Test/production configurations mix. Missing edges prove
 nothing: inspect source and run tests.
 See the [historical Rust coverage audit](docs/rust-coverage.md) for earlier probes; verify gaps against current code.
 

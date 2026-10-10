@@ -19,12 +19,13 @@ struct Index<'a> {
     rust: BTreeMap<(RustOwner, Vec<String>), Vec<&'a SymbolKey>>,
     rust_trait_methods: BTreeSet<(RustOwner, String, String)>,
     rust_roots: BTreeSet<String>,
+    rust_owners: BTreeMap<String, RustOwner>,
     imports: HashMap<(&'a str, &'a str), Vec<&'a Import>>,
     exports: HashMap<(&'a str, &'a ExportName), Vec<&'a ExportBinding>>,
 }
 
-// Path-derived safety boundary, not a Cargo target model. A sibling module in a
-// multi-root src/ directory has unknown ownership until its declarations are known.
+// Conventional Cargo roots and explicit file-module declarations bound local lookup.
+// A multiply-owned file has no single target-qualified symbol identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum RustOwner {
     Root(String),
@@ -32,9 +33,14 @@ enum RustOwner {
 }
 
 impl<'a> Index<'a> {
-    fn new(symbols: impl IntoIterator<Item = &'a LocalSymbol>, roots: BTreeSet<String>) -> Self {
+    fn new(
+        symbols: impl IntoIterator<Item = &'a LocalSymbol>,
+        roots: BTreeSet<String>,
+        owners: BTreeMap<String, RustOwner>,
+    ) -> Self {
         let mut index = Self {
             rust_roots: roots,
+            rust_owners: owners,
             ..Self::default()
         };
         for symbol in symbols {
@@ -62,7 +68,7 @@ impl<'a> Index<'a> {
                         method.clone(),
                     ));
                 }
-                let mut qualified = rust::module(&key.file);
+                let mut qualified = rust::module(&key.file, &root);
                 qualified.extend_from_slice(&key.qualified_name);
                 index.rust.entry((root, qualified)).or_default().push(key);
             }
@@ -71,7 +77,10 @@ impl<'a> Index<'a> {
     }
 
     fn rust_owner(&self, file: &str) -> RustOwner {
-        rust::owner(file, &self.rust_roots)
+        self.rust_owners
+            .get(file)
+            .cloned()
+            .unwrap_or_else(|| rust::owner(file, &self.rust_roots))
     }
 
     fn imports<'b>(&'b self, file: &'b str, local: &'b str) -> &'b [&'b Import] {
@@ -144,9 +153,11 @@ pub(crate) fn program<'a>(
         .filter(|artifact| artifact.language == Language::Rust && rust::is_root(&artifact.path))
         .map(|artifact| artifact.path.clone())
         .collect();
+    let owners = rust::owners(&artifacts, &roots);
     let mut all_symbols = Index::new(
         artifacts.iter().flat_map(|artifact| &artifact.symbols),
         roots,
+        owners,
     );
     for artifact in &artifacts {
         for import in &artifact.imports {

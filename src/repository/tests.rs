@@ -612,6 +612,87 @@ fn rust_roots_do_not_cross_resolve_and_unknown_siblings_stay_local() {
 }
 
 #[test]
+fn rust_declared_modules_rebuild_ownership_when_root_changes() {
+    let mut repo = Repository::new().unwrap();
+    repo.change("src/lib.rs", b"mod tasks; pub fn run() { tasks::work(); }")
+        .unwrap();
+    repo.change("src/main.rs", b"fn main() { tasks::work(); }")
+        .unwrap();
+    repo.change("src/tasks.rs", b"pub fn work() {}").unwrap();
+    let work = repo
+        .current
+        .graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/tasks.rs")
+        .unwrap()
+        .clone();
+    let lib = repo
+        .current
+        .graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/lib.rs")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        repo.current.graph.incoming[&work]
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![&lib]
+    );
+    repo.change("src/lib.rs", b"pub fn run() { tasks::work(); }")
+        .unwrap();
+    assert!(!repo.current.graph.incoming.contains_key(&work));
+    repo.change("src/main.rs", b"mod tasks; fn main() { tasks::work(); }")
+        .unwrap();
+    let main = repo
+        .current
+        .graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/main.rs")
+        .unwrap();
+    assert_eq!(
+        repo.current.graph.incoming[&work]
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![main]
+    );
+}
+
+#[test]
+fn rust_flat_bin_root_resolves_declared_child_module() {
+    let mut repo = Repository::new().unwrap();
+    repo.change("src/lib.rs", b"pub fn work() {}").unwrap();
+    repo.change(
+        "src/bin/tool.rs",
+        b"mod helper; fn main() { helper::work(); }",
+    )
+    .unwrap();
+    repo.change("src/bin/tool/helper.rs", b"pub fn work() {}")
+        .unwrap();
+    let work = repo
+        .current
+        .graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/bin/tool/helper.rs")
+        .unwrap();
+    let main = repo
+        .current
+        .graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/bin/tool.rs")
+        .unwrap();
+    assert_eq!(
+        repo.current.graph.incoming[work].iter().collect::<Vec<_>>(),
+        vec![main]
+    );
+}
+
+#[test]
 fn rust_single_root_keeps_module_resolution() {
     let mut repo = Repository::new().unwrap();
     repo.change(

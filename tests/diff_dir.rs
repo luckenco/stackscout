@@ -187,6 +187,15 @@ fn rust_calls_resolve_inside_file_modules() {
 }
 
 #[test]
+fn rust_target_modules_keep_conventional_roots_isolated() {
+    let output = fixture("rust-target-ownership");
+    assert!(output.contains("rust:src/lib.rs::library"));
+    assert!(output.contains("rust:src/bin/tool/nested.rs::work"));
+    assert!(!output.contains("rust:src/main.rs::main"));
+    assert!(!output.contains("rust:src/bin/tool/main.rs::main"));
+}
+
+#[test]
 fn typescript_bindings_shadow_file_functions() {
     fixture("typescript-shadowing");
 }

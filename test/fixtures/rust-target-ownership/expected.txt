@@ -1,0 +1,12 @@
+~ rust:src/bin/tool/nested.rs::work
+-   rust:src/bin/tool/nested.rs::old
++   rust:src/bin/tool/nested.rs::new
+
+  rust:src/lib.rs::library
+~   rust:src/lib_feature.rs::work
+-     rust:src/lib_feature.rs::old
++     rust:src/lib_feature.rs::new
+
+~ rust:src/shared.rs::leaf
+-   rust:src/shared.rs::old
++   rust:src/shared.rs::new

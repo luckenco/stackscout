@@ -203,7 +203,7 @@ fn budget_counts_duplicate_candidate_visits_and_has_an_exact_boundary() {
         super::TYPESCRIPT_WORK_LIMIT + 1,
     ] {
         let symbols = vec![dep.symbols[0].clone(); n];
-        let index = super::Index::new(&symbols, Default::default());
+        let index = super::Index::new(&symbols, Default::default(), Default::default());
         let mut candidates = super::Candidates::new();
         index.file(dep.language, &dep.path, &["work".into()], &mut candidates);
         assert_eq!(candidates.remaining, 0);
