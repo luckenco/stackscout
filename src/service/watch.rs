@@ -64,6 +64,7 @@ impl Pending {
                 return;
             }
         };
+        let mut target_ignored = None;
         for event in events {
             if event.need_rescan() {
                 self.recover(Some("watcher lost events".to_owned()));
@@ -85,6 +86,13 @@ impl Pending {
                     || relative == Path::new(".git/config")
                 {
                     self.recover(None);
+                    continue;
+                }
+                // Discovery omits the whole ignored Cargo output tree, including .rs files.
+                if relative.starts_with("target")
+                    && relative != Path::new("target")
+                    && *target_ignored.get_or_insert_with(|| ignored_target(root))
+                {
                     continue;
                 }
                 if relative
@@ -137,6 +145,24 @@ impl Pending {
             }
         }
     }
+}
+
+fn ignored_target(root: &Path) -> bool {
+    let target = root.join("target");
+    if !target
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_dir())
+    {
+        return false;
+    }
+    for entry in ignore::WalkBuilder::new(root).max_depth(Some(1)).build() {
+        match entry {
+            Ok(entry) if entry.path() == target => return false,
+            Err(_) => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 pub(super) fn start(root: PathBuf, pending: Arc<Mutex<Pending>>) -> notify::Result<Watcher> {
@@ -220,6 +246,9 @@ mod tests {
             Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
                 .add_path(root.join("target/debug/libfoo.rlib"))
                 .add_path(root.join("src/foo.rs")),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(root.join("src/foo.rs"))
+                .add_path(root.join("src/bar.rs")),
             Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
                 .add_path(root.join("src")),
             Event::new(EventKind::Create(CreateKind::File)).add_path(root.join(".gitignore")),
@@ -230,6 +259,45 @@ mod tests {
             assert_eq!(pending.take(), Some(None));
             assert!(pending.recovery_needed);
         }
+    }
+
+    #[test]
+    fn ignored_build_artifact_events_do_not_request_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        assert!(ignored_target(root));
+        for event in [
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+                .add_path(root.join("target/debug/libfoo.rlib")),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(root.join("target/debug/libfoo.rlib")),
+            Event::new(EventKind::Remove(RemoveKind::Folder))
+                .add_path(root.join("target/debug/build")),
+            Event::new(EventKind::Create(CreateKind::Folder))
+                .add_path(root.join("target/debug/build")),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+                .add_path(root.join("target/debug/build.rs")),
+        ] {
+            let mut pending = Pending::default();
+            pending.events(root, Ok(vec![DebouncedEvent::new(event, Instant::now())]));
+            assert_eq!(pending.take(), None);
+            assert!(!pending.recovery_needed);
+        }
+        std::fs::write(root.join(".gitignore"), "").unwrap();
+        assert!(!ignored_target(root));
+        let mut pending = Pending::default();
+        pending.events(
+            root,
+            Ok(vec![DebouncedEvent::new(
+                Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+                    .add_path(root.join("target/debug/libfoo.rlib")),
+                Instant::now(),
+            )]),
+        );
+        assert_eq!(pending.take(), Some(None));
     }
 
     #[test]

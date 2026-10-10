@@ -79,7 +79,7 @@ stream, not a captured pipe when awaiting EOF. Stop old owners before binary upg
 ## Resource limits
 
 - Configure before startup: `STACKSCOUT_INDEX_THREADS=1..8` (default capped at 4), `STACKSCOUT_WATCH=0` to disable watching.
-- Watching: 100-ms debounce, 4,096 pending paths; overflow/errors require reconciliation. Retry after 1 second, reconcile every 30 seconds.
+- Watching: 100-ms debounce, 4,096 pending paths; overflow/errors require reconciliation. Events inside `target/` are skipped only while discovery confirms the directory is ignored; changes to ignore controls still trigger reconciliation. Retry after 1 second, reconcile every 30 seconds.
 - Sources: 8 MiB/file in the service. After parsing, iterative validation rejects ASTs over 128 levels or 100,000 nodes (including tokens/errors) before recursive analysis. This bounds visitor stack depth, not parser CPU/memory or all extraction work. Changed files reparse; batches rebuild global resolution/edges. Generations share immutable artifacts but still cost memory.
 - TypeScript resolution: 256 matching-binding/file/candidate visits per call, retaining at most 256 witnesses. Exhaustion may omit edges; it is explicit in queries/diffs/reviews. Rust resolution retains its existing unbounded candidate searches.
 - Ingress: 32 accepts/batch, 64 incomplete frames (oldest evicted). Four query workers/8 queued queries; one writer/8 queued updates. Full queues reject.
