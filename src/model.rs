@@ -87,6 +87,12 @@ pub(crate) enum CallTarget {
     Path(Vec<String>),
     /// A Rust method call through a receiver whose type is not known syntactically.
     Method(Vec<String>),
+    /// A direct receiver with an explicit, plain nominal type annotation.
+    TypedMethod {
+        receiver: String,
+        owner: Vec<String>,
+        method: String,
+    },
     /// A TypeScript constructor call such as `new Worker()`.
     Constructor(Vec<String>),
     /// A bare call shadowed by a parameter or local binding.
@@ -103,6 +109,9 @@ impl fmt::Display for CallTarget {
             Self::SelfMethod(name) => write!(f, "self.{name}"),
             Self::SelfAssociated(name) => write!(f, "Self::{name}"),
             Self::Path(path) | Self::Method(path) => f.write_str(&path.join("::")),
+            Self::TypedMethod {
+                receiver, method, ..
+            } => write!(f, "{receiver}::{method}"),
             Self::Constructor(path) => write!(f, "new {}", path.join(".")),
             Self::Bound(name) | Self::Opaque(name) => f.write_str(name),
         }
@@ -192,6 +201,8 @@ pub(crate) struct FileArtifact {
     pub(crate) imports: Vec<Import>,
     pub(crate) rust_imports: Vec<RustImport>,
     pub(crate) exports: Vec<ExportBinding>,
+    /// Non-callable Rust item shapes, grouped by unsupported impact category.
+    pub(crate) unsupported: std::collections::BTreeMap<&'static str, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

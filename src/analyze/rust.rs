@@ -21,10 +21,75 @@ pub(super) fn extract(
         imports: Vec::new(),
         rust_imports: Vec::new(),
         exports: Vec::new(),
+        unsupported: Default::default(),
     };
     imports(path, source, root, &[], root, &mut artifact.rust_imports)?;
     definitions(path, source, root, &[], &[], &[], &mut artifact)?;
+    unsupported(path, source, root, &mut artifact.unsupported)?;
+    for shapes in artifact.unsupported.values_mut() {
+        shapes.sort();
+    }
     Ok(artifact)
+}
+
+fn unsupported(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut std::collections::BTreeMap<&'static str, Vec<String>>,
+) -> Result<(), AnalyzeError> {
+    let category = match node.kind() {
+        "const_item" => Some("const"),
+        "macro_definition" => Some("macro"),
+        "struct_item" => Some("struct"),
+        _ => None,
+    };
+    if let Some(category) = category {
+        let target = if category == "struct" {
+            node.child_by_field_name("body")
+        } else {
+            Some(node)
+        };
+        if let Some(target) = target {
+            let mut value = String::new();
+            if category == "struct"
+                && let Some(name) = node.child_by_field_name("name")
+            {
+                item_shape(path, source, name, &mut value)?;
+            }
+            item_shape(path, source, target, &mut value)?;
+            output.entry(category).or_default().push(value);
+        }
+        return Ok(());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        unsupported(path, source, child, output)?;
+    }
+    Ok(())
+}
+
+fn item_shape(
+    path: &str,
+    source: &str,
+    node: Node<'_>,
+    output: &mut String,
+) -> Result<(), AnalyzeError> {
+    if matches!(node.kind(), "line_comment" | "block_comment") {
+        return Ok(());
+    }
+    if node.child_count() == 0 {
+        output.push_str(node.kind());
+        output.push(':');
+        output.push_str(text(path, source, node)?);
+        output.push('|');
+        return Ok(());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        item_shape(path, source, child, output)?;
+    }
+    Ok(())
 }
 
 fn imports<'tree>(
@@ -474,12 +539,134 @@ fn collect_call(
         {
             target = CallTarget::Bound(parts.join("::"));
         }
+        CallTarget::Method(parts) if parts.len() == 2 => {
+            if let Some(owner) = receiver_type(path, source, node, &parts[0])?
+                && !bound(path, source, node, &owner[0], true)?
+            {
+                target = CallTarget::TypedMethod {
+                    receiver: parts[0].clone(),
+                    owner,
+                    method: parts[1].clone(),
+                };
+            }
+        }
         _ => {}
     }
     Ok(Some(CallSite {
         target,
         location: range(node),
     }))
+}
+
+// Only direct identifiers with explicit nominal annotations are inferred. A nearer
+// untyped binding blocks an outer typed one; expression inference is left unknown.
+fn receiver_type(
+    path: &str,
+    source: &str,
+    call: Node<'_>,
+    name: &str,
+) -> Result<Option<Vec<String>>, AnalyzeError> {
+    let mut ancestor = call.parent();
+    while let Some(node) = ancestor {
+        if node.kind() == "match_arm"
+            && let Some(pattern) = node.child_by_field_name("pattern")
+            && pattern_binds(path, source, pattern, name)?
+        {
+            return Ok(None);
+        }
+        if node.kind() == "for_expression"
+            && node
+                .child_by_field_name("body")
+                .is_some_and(|body| call.start_byte() >= body.start_byte())
+            && let Some(pattern) = node.child_by_field_name("pattern")
+            && pattern_binds(path, source, pattern, name)?
+        {
+            return Ok(None);
+        }
+        if matches!(node.kind(), "if_expression" | "while_expression")
+            && node
+                .child_by_field_name("alternative")
+                .is_none_or(|body| call.start_byte() < body.start_byte())
+            && let Some(condition) = node.child_by_field_name("condition")
+            && let_binds(path, source, condition, call.start_byte(), name)?
+        {
+            return Ok(None);
+        }
+        if node.kind() == "closure_expression"
+            && let Some(parameters) = node.child_by_field_name("parameters")
+        {
+            let mut cursor = parameters.walk();
+            for parameter in parameters.named_children(&mut cursor) {
+                if pattern_binds(path, source, parameter, name)? {
+                    return Ok(None);
+                }
+            }
+        }
+        if node.kind() == "block" {
+            let mut cursor = node.walk();
+            let items = node.named_children(&mut cursor).collect::<Vec<_>>();
+            for item in items.into_iter().rev() {
+                if matches!(item.kind(), "const_item" | "static_item")
+                    && required_field(path, source, item, "name")? == name
+                {
+                    return Ok(None);
+                }
+                if item.kind() != "let_declaration" || item.end_byte() > call.start_byte() {
+                    continue;
+                }
+                if let Some(pattern) = item.child_by_field_name("pattern")
+                    && pattern_binds(path, source, pattern, name)?
+                {
+                    if pattern.kind() == "identifier"
+                        && let Some(annotation) = item.child_by_field_name("type")
+                    {
+                        return annotated_type(path, source, annotation);
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+        if node.kind() == "function_item" {
+            if let Some(parameters) = node.child_by_field_name("parameters") {
+                let mut cursor = parameters.walk();
+                for parameter in parameters.named_children(&mut cursor) {
+                    if let Some(pattern) = parameter.child_by_field_name("pattern")
+                        && pattern_binds(path, source, pattern, name)?
+                    {
+                        if pattern.kind() == "identifier"
+                            && let Some(annotation) = parameter.child_by_field_name("type")
+                        {
+                            return annotated_type(path, source, annotation);
+                        }
+                        return Ok(None);
+                    }
+                }
+            }
+            return Ok(None);
+        }
+        ancestor = node.parent();
+    }
+    Ok(None)
+}
+
+fn annotated_type(
+    path: &str,
+    source: &str,
+    mut node: Node<'_>,
+) -> Result<Option<Vec<String>>, AnalyzeError> {
+    if node.kind() == "reference_type" {
+        let Some(inner) = node.child_by_field_name("type") else {
+            return Ok(None);
+        };
+        node = inner;
+    }
+    if matches!(node.kind(), "type_identifier" | "scoped_type_identifier") {
+        let parts = use_path(path, source, node)?;
+        if parts.iter().all(|part| !part.contains('<')) {
+            return Ok(Some(parts));
+        }
+    }
+    Ok(None)
 }
 
 fn call_target(

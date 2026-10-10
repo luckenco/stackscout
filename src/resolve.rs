@@ -16,14 +16,27 @@ use crate::model::{
 #[derive(Default)]
 struct Index<'a> {
     files: BTreeMap<(Language, &'a str, &'a [String]), Vec<&'a SymbolKey>>,
-    rust: BTreeMap<Vec<String>, Vec<&'a SymbolKey>>,
+    rust: BTreeMap<(RustOwner, Vec<String>), Vec<&'a SymbolKey>>,
+    rust_trait_methods: BTreeSet<(RustOwner, String, String)>,
+    rust_roots: BTreeSet<String>,
     imports: HashMap<(&'a str, &'a str), Vec<&'a Import>>,
     exports: HashMap<(&'a str, &'a ExportName), Vec<&'a ExportBinding>>,
 }
 
+// Path-derived safety boundary, not a Cargo target model. A sibling module in a
+// multi-root src/ directory has unknown ownership until its declarations are known.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RustOwner {
+    Root(String),
+    Unknown(String),
+}
+
 impl<'a> Index<'a> {
-    fn new(symbols: impl IntoIterator<Item = &'a LocalSymbol>) -> Self {
-        let mut index = Self::default();
+    fn new(symbols: impl IntoIterator<Item = &'a LocalSymbol>, roots: BTreeSet<String>) -> Self {
+        let mut index = Self {
+            rust_roots: roots,
+            ..Self::default()
+        };
         for symbol in symbols {
             let key = &symbol.key;
             index
@@ -32,12 +45,33 @@ impl<'a> Index<'a> {
                 .or_default()
                 .push(key);
             if key.language == Language::Rust {
+                let root = index.rust_owner(&key.file);
+                if let Some((owner, method)) = key
+                    .qualified_name
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .zip(key.qualified_name.last())
+                    && let Some(ty) = owner
+                        .strip_prefix('<')
+                        .and_then(|part| part.split_once(" as "))
+                {
+                    index.rust_trait_methods.insert((
+                        root.clone(),
+                        ty.0.to_owned(),
+                        method.clone(),
+                    ));
+                }
                 let mut qualified = rust::module(&key.file);
                 qualified.extend_from_slice(&key.qualified_name);
-                index.rust.entry(qualified).or_default().push(key);
+                index.rust.entry((root, qualified)).or_default().push(key);
             }
         }
         index
+    }
+
+    fn rust_owner(&self, file: &str) -> RustOwner {
+        rust::owner(file, &self.rust_roots)
     }
 
     fn imports<'b>(&'b self, file: &'b str, local: &'b str) -> &'b [&'b Import] {
@@ -105,7 +139,15 @@ pub(crate) fn program<'a>(
     artifacts: impl IntoIterator<Item = &'a FileArtifact>,
 ) -> ResolvedProgram {
     let artifacts = artifacts.into_iter().collect::<Vec<_>>();
-    let mut all_symbols = Index::new(artifacts.iter().flat_map(|artifact| &artifact.symbols));
+    let roots = artifacts
+        .iter()
+        .filter(|artifact| artifact.language == Language::Rust && rust::is_root(&artifact.path))
+        .map(|artifact| artifact.path.clone())
+        .collect();
+    let mut all_symbols = Index::new(
+        artifacts.iter().flat_map(|artifact| &artifact.symbols),
+        roots,
+    );
     for artifact in &artifacts {
         for import in &artifact.imports {
             all_symbols
@@ -211,7 +253,9 @@ fn target(
         CallTarget::Bound(_) | CallTarget::Opaque(_) => {
             return Resolution::Uncertain(target.clone());
         }
-        CallTarget::Method(_) => return Resolution::Unresolved(target.clone()),
+        CallTarget::Method(_) | CallTarget::TypedMethod { .. } => {
+            return Resolution::Unresolved(target.clone());
+        }
         CallTarget::ThisMethod(name)
         | CallTarget::SelfMethod(name)
         | CallTarget::SelfAssociated(name) => {

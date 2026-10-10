@@ -98,6 +98,7 @@ fn compare_dirs(before: &Path, after: &Path, diagnostics: bool) -> Result<String
         .artifacts
         .retain(|artifact| !omitted.contains(&artifact.path));
 
+    let unsupported = diff::unsupported(&before.artifacts, &after.artifacts);
     let before_graph = build(&before.artifacts)?;
     let after_graph = build(&after.artifacts)?;
     let graph_diff = render::render(&diff::compare(&before_graph, &after_graph));
@@ -105,6 +106,7 @@ fn compare_dirs(before: &Path, after: &Path, diagnostics: bool) -> Result<String
         &before.issues.iter().collect::<Vec<_>>(),
         &after.issues.iter().collect::<Vec<_>>(),
         &omitted,
+        &unsupported,
         graph_diff,
         diagnostics,
     ))
@@ -121,10 +123,11 @@ fn render_issues(
     before: &[&analyze::Issue],
     after: &[&analyze::Issue],
     omitted: &BTreeSet<String>,
+    unsupported: &[(String, &'static str)],
     graph_diff: String,
     diagnostics: bool,
 ) -> String {
-    if omitted.is_empty() {
+    if omitted.is_empty() && unsupported.is_empty() {
         return graph_diff;
     }
 
@@ -159,6 +162,19 @@ fn render_issues(
         } else {
             issue_line(&mut output, status, path);
         }
+        wrote_issue = true;
+    }
+    for (path, category) in unsupported {
+        if output.truncated {
+            break;
+        }
+        use std::fmt::Write;
+        let path = if path.chars().any(char::is_control) {
+            format!("{path:?}")
+        } else {
+            path.clone()
+        };
+        let _ = writeln!(output, "! unsupported (rust {category}): {path}");
         wrote_issue = true;
     }
     let graph_truncated = graph_diff.ends_with(render::TRUNCATED);
@@ -202,6 +218,7 @@ mod tests {
                 &[],
                 &[&issue],
                 &super::BTreeSet::from([path.to_owned()]),
+                &[],
                 String::new(),
                 diagnostics,
             );
@@ -223,7 +240,7 @@ mod tests {
         let omitted = issues.iter().map(|issue| issue.path.clone()).collect();
         let refs = issues.iter().collect::<Vec<_>>();
         let graph_diff = format!("{}{}", "x".repeat(48 * 1024), crate::render::TRUNCATED);
-        let output = super::render_issues(&[], &refs, &omitted, graph_diff, true);
+        let output = super::render_issues(&[], &refs, &omitted, &[], graph_diff, true);
         assert!(output.len() <= 48 * 1024 + crate::render::TRUNCATED.len());
         assert_eq!(output.matches(crate::render::TRUNCATED).count(), 1);
         assert!(output.ends_with(crate::render::TRUNCATED));

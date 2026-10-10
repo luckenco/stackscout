@@ -13,6 +13,10 @@ target/debug/stackscout diff-dir <before-directory> <after-directory>
 
 `~` marks local changes; `+`/`-` mark added/removed call paths, not necessarily implementations.
 Failed-analysis files are omitted from both sides; `--diagnostics` includes unchanged failures.
+Changed Rust const items, struct fields, and macro definitions emit `! unsupported` by file and
+category: possible impact, not a discovered call edge. These signals also appear in checkpoint
+and service diffs. Scoped review does **not** include them; acknowledging a review cannot certify
+non-callable edits. Inspect the aggregate diff separately.
 Diff expansion and output are bounded; truncation explicitly marks incomplete evidence.
 
 ## Repository service
@@ -49,9 +53,15 @@ Cancellation closes client requests, not the owner. Truncated output cannot prov
 
 `Repository` accepts relative paths and supplied bytes; see its [doctests](src/repository.rs) or `cargo doc --open`.
 Tree-sitter supports `.rs`, `.ts`, `.tsx`, `.mts`, `.cts`; declarations and hidden directories are skipped.
-Receivers, generics, globs/re-exports, closures, macros, dynamic/external/generated code may be unresolved
-or omitted. Test/production configurations mix. Missing edges prove nothing: inspect source and run tests.
-See the [Rust coverage audit](docs/rust-coverage.md) for verified gaps and recommended priorities.
+Only direct Rust receivers with plain explicit nominal annotations are resolved; inferred, generic,
+trait, or chained dispatch and globs/re-exports, closures, macros, dynamic/external/generated code
+may be unresolved or omitted. Conventional `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`
+roots are isolated by path, not Cargo metadata. With multiple roots, sibling `src/*.rs`
+files have unknown target ownership, so calls to and from them resolve only within their
+own file. Custom target paths, `#[path]` modules, shared modules, cross-crate imports, and
+Cargo manifest changes are not modeled. Test/production configurations mix. Missing edges prove
+nothing: inspect source and run tests.
+See the [historical Rust coverage audit](docs/rust-coverage.md) for earlier probes; verify gaps against current code.
 
 ## Checks
 

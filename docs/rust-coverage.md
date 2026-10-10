@@ -2,6 +2,11 @@
 
 Audited **2026-09-07**, against **`ab51fae7`** (`main`), stackscout 0.1.0.
 
+> Historical snapshot, not a current gap list. Later changes added cfg-qualified identities,
+> safe foreign-item handling, trait default owners, path/raw-identifier normalization,
+> and explicit opaque/deferred call boundaries. Check current code and tests before
+> using the priorities below.
+
 ## Verdict
 
 **No: stackscout does not cover all Rust syntax or the common semantic cases needed

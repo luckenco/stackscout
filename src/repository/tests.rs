@@ -117,6 +117,148 @@ fn batch_updates_match_fixtures_and_reuse_unchanged_analysis() {
 }
 
 #[test]
+fn rust_unsupported_edits_signal_without_inventing_call_paths() {
+    for (category, before, after) in [
+        (
+            "const",
+            "const LIMIT: usize = 1;",
+            "const LIMIT: usize = 2;",
+        ),
+        (
+            "struct",
+            "struct Config { size: usize }",
+            "struct Config { size: u64 }",
+        ),
+        (
+            "macro",
+            "macro_rules! value { () => { 1 } }",
+            "macro_rules! value { () => { 2 } }",
+        ),
+        ("struct", "struct Config(usize);", "struct Config(u64);"),
+        (
+            "const",
+            "struct Config; impl Config { const LIMIT: usize = 1; }",
+            "struct Config; impl Config { const LIMIT: usize = 2; }",
+        ),
+        (
+            "const",
+            "fn run() { const LIMIT: usize = 1; }",
+            "fn run() { const LIMIT: usize = 2; }",
+        ),
+    ] {
+        let mut repo = Repository::new().unwrap();
+        repo.change("src/lib.rs", before.as_bytes()).unwrap();
+        repo.checkpoint("before");
+        repo.change("src/lib.rs", after.as_bytes()).unwrap();
+        let output = repo.diff("before").unwrap();
+        assert!(output.starts_with(&format!("! unsupported (rust {category}): src/lib.rs\n")));
+        if before.starts_with("fn run") {
+            assert!(output.contains("~ rust:src/lib.rs::run"));
+        } else {
+            assert_eq!(output.lines().count(), 1);
+        }
+        repo.checkpoint("after");
+        assert_eq!(repo.diff("after").unwrap(), "");
+    }
+
+    let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    fs::write(
+        dirs[0].path().join("lib.rs"),
+        "const LIMIT: usize = 1; fn run() {}",
+    )
+    .unwrap();
+    fs::write(
+        dirs[1].path().join("lib.rs"),
+        "const LIMIT: usize = 2; fn run() { work(); }",
+    )
+    .unwrap();
+    let mut repo = Repository::new().unwrap();
+    repo.change("lib.rs", &fs::read(dirs[0].path().join("lib.rs")).unwrap())
+        .unwrap();
+    repo.checkpoint("baseline");
+    repo.change("lib.rs", &fs::read(dirs[1].path().join("lib.rs")).unwrap())
+        .unwrap();
+    let forward = repo.diff("baseline").unwrap();
+    assert!(forward.contains("! unsupported (rust const): lib.rs"));
+    assert!(forward.contains("work"));
+    assert_eq!(
+        forward,
+        crate::diff_dirs(dirs[0].path(), dirs[1].path()).unwrap()
+    );
+    assert!(
+        crate::diff_dirs(dirs[1].path(), dirs[0].path())
+            .unwrap()
+            .contains("! unsupported (rust const): lib.rs")
+    );
+    repo.change("lib.rs", b"const LIMIT: usize = 1; fn run() {}")
+        .unwrap();
+    assert_eq!(repo.diff("baseline").unwrap(), "");
+
+    for (before, after) in [
+        (
+            "struct Config { size: usize }",
+            "struct Config { /* note */ size : usize }",
+        ),
+        (
+            "macro_rules! value { () => { 1 } }",
+            "macro_rules! value { ( ) => { /* note */ 1 } }",
+        ),
+    ] {
+        let mut repo = Repository::new().unwrap();
+        repo.change("lib.rs", before.as_bytes()).unwrap();
+        repo.checkpoint("before");
+        repo.change("lib.rs", after.as_bytes()).unwrap();
+        assert_eq!(repo.diff("before").unwrap(), "");
+    }
+    let mut repo = Repository::new().unwrap();
+    repo.change("lib.rs", b"const LIMIT: usize = 1; // before")
+        .unwrap();
+    repo.checkpoint("before");
+    repo.change("lib.rs", b"/* after */ const LIMIT : usize = 1 ;")
+        .unwrap();
+    assert_eq!(repo.diff("before").unwrap(), "");
+    repo.change("lib.rs", b"const LIMIT: usize = 2; fn broken(")
+        .unwrap();
+    assert!(
+        repo.diff("before")
+            .unwrap()
+            .contains("! incomplete (introduced; omitted from both): lib.rs")
+    );
+    assert!(!repo.diff("before").unwrap().contains("! unsupported"));
+}
+
+#[test]
+fn rust_unsupported_signals_are_ordered_and_bounded() {
+    let mut repo = Repository::new().unwrap();
+    let baseline = (0..600)
+        .map(|index| {
+            (
+                format!("{index:04}_{}.rs", "a".repeat(100)),
+                Some(b"const LIMIT: usize = 1;".to_vec()),
+            )
+        })
+        .collect();
+    repo.update(&baseline).unwrap();
+    repo.checkpoint("before");
+    let changes = (0..600)
+        .map(|index| {
+            (
+                format!("{index:04}_{}.rs", "a".repeat(100)),
+                Some(b"const LIMIT: usize = 2;".to_vec()),
+            )
+        })
+        .collect();
+    repo.update(&changes).unwrap();
+    let output = repo.diff("before").unwrap();
+    assert!(output.starts_with(&format!(
+        "! unsupported (rust const): 0000_{}.rs\n",
+        "a".repeat(100)
+    )));
+    assert!(output.ends_with(crate::render::TRUNCATED));
+    assert!(output.len() <= 48 * 1024 + crate::render::TRUNCATED.len());
+}
+
+#[test]
 fn failure_filtering_reuses_graphs_unless_a_valid_artifact_is_removed() {
     let mut repo = Repository::new().unwrap();
     repo.change("bad.ts", b"export function work() {}").unwrap();
@@ -389,6 +531,148 @@ fn checkpoints_survive_edits_deletions_and_name_replacement() {
         repo.diff("missing").unwrap_err().to_string(),
         "unknown checkpoint: missing"
     );
+}
+
+#[test]
+fn cargo_binary_does_not_call_same_package_library_prelude_shadow() {
+    let root = tempfile::tempdir().unwrap();
+    for (name, lib) in [
+        ("before", "pub fn drop<T>(_: T) {}\n"),
+        ("after", "pub fn drop<T>(_: T) { audit(); } fn audit() {}\n"),
+    ] {
+        let dir = root.path().join(name);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"ownership_repro\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(dir.join("src/lib.rs"), lib).unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() { drop(1); }\n").unwrap();
+    }
+    // `drop` in the binary comes from the standard prelude, not the distinct library target.
+    let output = crate::diff_dirs(root.path().join("before"), root.path().join("after")).unwrap();
+    assert!(output.contains("rust:src/lib.rs::drop"));
+    let mut analyzers = crate::analyze::Analyzers::new().unwrap();
+    let directory = analyzers.directory(&root.path().join("before")).unwrap();
+    let graph = crate::build(&directory.artifacts).unwrap();
+    let lib = graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/lib.rs")
+        .unwrap();
+    assert!(
+        !graph.incoming.contains_key(lib),
+        "binary call must not point into the library"
+    );
+}
+
+#[test]
+fn rust_roots_do_not_cross_resolve_and_unknown_siblings_stay_local() {
+    let mut repo = Repository::new().unwrap();
+    repo.change(
+        "src/lib.rs",
+        b"pub fn run() { std::mem::drop(1); }
+",
+    )
+    .unwrap();
+    repo.change(
+        "src/main.rs",
+        b"fn main() { drop(1); } mod std { pub mod mem { pub fn drop<T>(_: T) {} } }
+",
+    )
+    .unwrap();
+    repo.change(
+        "src/foo.rs",
+        b"pub fn drop<T>(_: T) {} pub fn local() { drop(1); }
+",
+    )
+    .unwrap();
+    let graph = &repo.current.graph;
+    let main_drop = graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/main.rs" && key.name() == "std::mem::drop")
+        .unwrap();
+    let sibling_drop = graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/foo.rs" && key.name() == "drop")
+        .unwrap();
+    let sibling_local = graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/foo.rs" && key.name() == "local")
+        .unwrap();
+    assert!(!graph.incoming.contains_key(main_drop));
+    assert_eq!(
+        graph.incoming[sibling_drop].iter().collect::<Vec<_>>(),
+        vec![sibling_local]
+    );
+}
+
+#[test]
+fn rust_single_root_keeps_module_resolution() {
+    let mut repo = Repository::new().unwrap();
+    repo.change(
+        "src/lib.rs",
+        b"mod foo; pub fn run() { foo::work(); }
+",
+    )
+    .unwrap();
+    repo.change(
+        "src/foo.rs",
+        b"pub fn work() {}
+",
+    )
+    .unwrap();
+    let graph = &repo.current.graph;
+    let run = graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/lib.rs")
+        .unwrap();
+    let work = graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/foo.rs")
+        .unwrap();
+    assert!(graph.incoming[work].contains(run));
+}
+
+#[test]
+fn rust_root_changes_rebuild_resolution_from_cached_files() {
+    let mut repo = Repository::new().unwrap();
+    repo.change(
+        "src/lib.rs",
+        b"pub fn drop<T>(_: T) {}
+",
+    )
+    .unwrap();
+    repo.change(
+        "src/foo.rs",
+        b"pub fn run() { crate::drop(1); }
+",
+    )
+    .unwrap();
+    let lib = repo
+        .current
+        .graph
+        .symbols
+        .keys()
+        .find(|key| key.file == "src/lib.rs")
+        .unwrap()
+        .clone();
+    assert!(repo.current.graph.incoming.contains_key(&lib));
+    repo.change(
+        "src/main.rs",
+        b"fn main() {}
+",
+    )
+    .unwrap();
+    assert!(!repo.current.graph.incoming.contains_key(&lib));
+    repo.delete("src/main.rs").unwrap();
+    assert!(repo.current.graph.incoming.contains_key(&lib));
 }
 
 #[test]

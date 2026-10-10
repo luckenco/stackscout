@@ -15,6 +15,21 @@ pub(super) fn resolve(
     let path = match target {
         CallTarget::Bare(name) => std::slice::from_ref(name),
         CallTarget::Path(path) => path,
+        CallTarget::TypedMethod { owner, method, .. } => {
+            // A generic type parameter or local type binding may have this spelling.
+            if owner
+                .first()
+                .is_some_and(|part| part == "Self" || part.contains('<'))
+            {
+                return Resolution::Uncertain(target.clone());
+            }
+            associated = owner
+                .iter()
+                .cloned()
+                .chain([method.clone()])
+                .collect::<Vec<_>>();
+            &associated
+        }
         CallTarget::SelfMethod(name) | CallTarget::SelfAssociated(name) => {
             let owner = &caller.key.qualified_name
                 [caller.module.len()..caller.key.qualified_name.len() - 1];
@@ -34,6 +49,7 @@ pub(super) fn resolve(
         }
         _ => return Resolution::Unresolved(target.clone()),
     };
+    let root = symbols.rust_owner(&caller.key.file);
     let mut caller_module = module(&caller.key.file);
     caller_module.extend_from_slice(&caller.module);
     let position = (location.start_line, location.start_column);
@@ -70,7 +86,7 @@ pub(super) fn resolve(
                 continue;
             };
             qualified.extend_from_slice(&path[1..]);
-            let found = matching(&qualified, symbols);
+            let found = matching(&root, &qualified, symbols);
             unresolved |= found.is_empty();
             candidates.extend(found);
         }
@@ -78,9 +94,29 @@ pub(super) fn resolve(
             return Resolution::Unresolved(target.clone());
         }
     } else if let Some(qualified) = qualify(&caller_module, path) {
-        candidates = matching(&qualified, symbols);
+        candidates = matching(&root, &qualified, symbols);
+    }
+    if matches!(target, CallTarget::TypedMethod { .. })
+        && qualified_type_has_trait_method(&root, path, symbols)
+    {
+        return Resolution::Uncertain(target.clone());
     }
     super::resolution(target, candidates)
+}
+
+fn qualified_type_has_trait_method(
+    root: &super::RustOwner,
+    path: &[String],
+    symbols: &super::Index<'_>,
+) -> bool {
+    let Some((method, owner)) = path.split_last() else {
+        return false;
+    };
+    owner.last().is_some_and(|ty| {
+        symbols
+            .rust_trait_methods
+            .contains(&(root.clone(), ty.clone(), method.clone()))
+    })
 }
 
 fn qualify(module: &[String], path: &[String]) -> Option<Vec<String>> {
@@ -105,15 +141,59 @@ fn qualify(module: &[String], path: &[String]) -> Option<Vec<String>> {
     Some(qualified)
 }
 
-fn matching(qualified: &[String], symbols: &super::Index<'_>) -> BTreeSet<SymbolKey> {
+fn matching(
+    root: &super::RustOwner,
+    qualified: &[String],
+    symbols: &super::Index<'_>,
+) -> BTreeSet<SymbolKey> {
     symbols
         .rust
-        .get(qualified)
+        .get(&(root.clone(), qualified.to_vec()))
         .into_iter()
         .flatten()
         .copied()
         .cloned()
         .collect()
+}
+
+pub(super) fn is_root(file: &str) -> bool {
+    let path = Path::new(file);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    (parent.file_name().is_some_and(|part| part == "src")
+        && matches!(
+            path.file_name().and_then(|part| part.to_str()),
+            Some("lib.rs" | "main.rs")
+        ))
+        || (parent.file_name().is_some_and(|part| part == "bin")
+            && parent
+                .parent()
+                .is_some_and(|part| part.file_name().is_some_and(|name| name == "src"))
+            && path.extension().is_some_and(|extension| extension == "rs"))
+}
+
+pub(super) fn owner(file: &str, roots: &BTreeSet<String>) -> super::RustOwner {
+    if roots.is_empty() {
+        return super::RustOwner::Root(String::new());
+    }
+    if roots.contains(file) {
+        return super::RustOwner::Root(file.to_owned());
+    }
+    let path = Path::new(file);
+    let src = path
+        .ancestors()
+        .find(|part| part.file_name().is_some_and(|name| name == "src"));
+    if let Some(src) = src {
+        let owners = roots
+            .iter()
+            .filter(|root| Path::new(root).starts_with(src))
+            .collect::<Vec<_>>();
+        if owners.len() == 1 {
+            return super::RustOwner::Root(owners[0].clone());
+        }
+    }
+    super::RustOwner::Unknown(file.to_owned())
 }
 
 pub(super) fn module(file: &str) -> Vec<String> {

@@ -242,7 +242,11 @@ impl Snapshot {
         locations: bool,
     ) -> Result<String, Error> {
         let unchanged = Arc::ptr_eq(&self.graph, &after.graph);
-        if unchanged && !diagnostics && !self.graph.limited {
+        if unchanged
+            && Arc::ptr_eq(&self.files, &after.files)
+            && !diagnostics
+            && !self.graph.limited
+        {
             return Ok(String::new());
         }
         let before_issues = self
@@ -260,37 +264,39 @@ impl Snapshot {
             .chain(&after_issues)
             .map(|issue| issue.path.clone())
             .collect::<BTreeSet<_>>();
-        // Identical publications need no graph walk, but unchanged diagnostics still matter.
-        if unchanged {
-            let mut graph_diff = String::new();
-            if self.graph.limited {
-                graph_diff.push_str(render::TRUNCATED);
+        let before_artifacts = self.files.iter().filter_map(|(path, file)| {
+            if omitted.contains(path) {
+                return None;
             }
-            return Ok(crate::render_issues(
-                &before_issues,
-                &after_issues,
-                &omitted,
-                graph_diff,
-                diagnostics,
-            ));
-        }
-        if omitted.is_empty() {
-            return Ok(render::render_with_locations(
-                &diff::compare(&self.graph, &after.graph),
-                locations,
-            ));
-        }
-
+            file.analysis.as_ref().ok()
+        });
+        let after_artifacts = after.files.iter().filter_map(|(path, file)| {
+            if omitted.contains(path) {
+                return None;
+            }
+            file.analysis.as_ref().ok()
+        });
+        let unsupported = diff::unsupported(before_artifacts, after_artifacts);
         // A failed path must be omitted from BOTH graphs, including resolution.
-        // Checkpoints retain artifacts so this never needs to read or parse sources.
-        let before_graph = self.without(&omitted)?;
-        let after_graph = after.without(&omitted)?;
-        let output =
-            render::render_with_locations(&diff::compare(&before_graph, &after_graph), locations);
+        let (before_graph, after_graph) = if omitted.is_empty() {
+            (Arc::clone(&self.graph), Arc::clone(&after.graph))
+        } else {
+            (self.without(&omitted)?, after.without(&omitted)?)
+        };
+        let output = if unchanged {
+            if self.graph.limited {
+                render::TRUNCATED.to_owned()
+            } else {
+                String::new()
+            }
+        } else {
+            render::render_with_locations(&diff::compare(&before_graph, &after_graph), locations)
+        };
         Ok(crate::render_issues(
             &before_issues,
             &after_issues,
             &omitted,
+            &unsupported,
             output,
             diagnostics,
         ))

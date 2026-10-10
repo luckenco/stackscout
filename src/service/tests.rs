@@ -100,6 +100,46 @@ fn diff_cache_bounds_payloads_without_pinning_graphs_or_caching_health() {
 }
 
 #[test]
+fn unsupported_rust_change_survives_service_checkpoint_and_cache() {
+    let directory = tempfile::tempdir().unwrap();
+    let shared = Shared {
+        root: directory.path().to_owned(),
+        instance: "test".to_owned(),
+        state: Mutex::new(State::default()),
+        watch: Arc::new(Mutex::new(watch::Pending::default())),
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let mut repo = Repository::new().unwrap();
+    fs::write(shared.root.join("lib.rs"), "const LIMIT: usize = 1;").unwrap();
+    assert!(refresh(&shared, &mut repo, &pool, None).error.is_none());
+    query(
+        &shared,
+        Operation::Checkpoint {
+            name: "before".to_owned(),
+        },
+    );
+    fs::write(shared.root.join("lib.rs"), "const LIMIT: usize = 2;").unwrap();
+    assert!(refresh(&shared, &mut repo, &pool, None).error.is_none());
+    for _ in 0..2 {
+        let response = query(
+            &shared,
+            Operation::Diff {
+                name: "before".to_owned(),
+                diagnostics: false,
+            },
+        );
+        assert_eq!(
+            response.diff.as_deref(),
+            Some("! unsupported (rust const): lib.rs\n")
+        );
+        assert!(!response.truncated);
+    }
+}
+
+#[test]
 fn limited_resolution_marks_small_and_cached_diffs_incomplete() {
     let directory = tempfile::tempdir().unwrap();
     let shared = Shared {

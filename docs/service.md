@@ -16,7 +16,7 @@ Check response `error` even when the CLI exits successfully.
 | `checkpoint` | `name` | Pin current generation; repeating a name returns its original pin. |
 | `diff` | `name`, optional `diagnostics: bool` | Compare checkpoint with the captured current generation. |
 | `forget` | `name` | Release a checkpoint; unknown names are errors. |
-| `callers` / `callees` / `impact` | `symbol`, optional `depth`, `limit` | Query incoming/outgoing paths; impact includes private callers. |
+| `callers` / `callees` / `impact` | `symbol`, optional `depth`, `limit` | Query incoming/outgoing paths; callers and impact both include private callers; impact defaults to greater depth. |
 | `review` | `name`, `baseline`, `baseline_generation`, `scope: {files?: string[], symbols?: string[]}` | Compare a scope, initially seeded from the named checkpoint at its expected generation. |
 | `acknowledge` | `name`, `token` | Advance a review to exactly its inspected generation. |
 | `forget_review` | `name` | Release the review and its pending result. |
@@ -50,8 +50,10 @@ any call in the graph is limited, even outside the visited component. Ranges are
 Scopes contain 1–16 file/symbol selectors of 1–512 bytes, normalized and bound to the review name/seed.
 Each side independently walks dependencies and callers; unrelated siblings are not inferred relevant.
 Results contain witnesses, unresolved/ambiguous boundaries, missing selectors, diagnostics, and truncation.
-A review pins its result without advancing the baseline. Acknowledgement advances only to that token's
-pinned generation, even after newer writes. New reviews supersede pending tokens; stale tokens fail.
+A review pins its result without advancing the baseline. Scoped review does **not** include
+`! unsupported` Rust const/struct-field/macro-definition change signals from aggregate diffs.
+Acknowledging a review cannot certify non-callable edits; inspect the checkpoint diff separately.
+Acknowledgement advances only to that token's pinned generation, even after newer writes. New reviews supersede pending tokens; stale tokens fail.
 Repeating the last successful acknowledgement is a no-op. Forgetting a review resets its next use to
 its original seed. Neither reviews nor acknowledgements change the session checkpoint.
 

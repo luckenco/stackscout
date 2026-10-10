@@ -9,6 +9,35 @@ const MAX_NODES: usize = 10_000;
 const MAX_WORK: usize = 20_000;
 const MAX_WITNESSES: usize = 8;
 
+pub(crate) fn unsupported<'a>(
+    before: impl IntoIterator<Item = &'a crate::model::FileArtifact>,
+    after: impl IntoIterator<Item = &'a crate::model::FileArtifact>,
+) -> Vec<(String, &'static str)> {
+    fn items<'a>(
+        artifacts: impl IntoIterator<Item = &'a crate::model::FileArtifact>,
+    ) -> BTreeMap<(String, &'static str), &'a Vec<String>> {
+        artifacts
+            .into_iter()
+            .flat_map(|artifact| {
+                artifact
+                    .unsupported
+                    .iter()
+                    .map(|(&category, shapes)| ((artifact.path.clone(), category), shapes))
+            })
+            .collect()
+    }
+    let before = items(before);
+    let after = items(after);
+    before
+        .keys()
+        .chain(after.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect()
+}
+
 fn spend(work: &mut usize) -> bool {
     if *work == 0 {
         return false;

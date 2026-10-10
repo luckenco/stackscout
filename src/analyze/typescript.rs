@@ -26,6 +26,7 @@ pub(super) fn extract(
         imports: Vec::new(),
         rust_imports: Vec::new(),
         exports: Vec::new(),
+        unsupported: Default::default(),
     };
     imports(path, source, root, &mut artifact.imports)?;
     exports(path, source, root, &mut artifact.exports)?;

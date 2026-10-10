@@ -128,6 +128,157 @@ fn normalizes_paths_raw_names_parentheses_and_qualified_impls() {
 }
 
 #[test]
+fn explicitly_typed_receivers_resolve_inherent_methods_without_name_guessing() {
+    let graph = graph(&[(
+        "lib.rs",
+        r#"
+        struct A; struct B;
+        impl A { fn work(&self) {} }
+        impl B { fn work(&self) {} }
+        fn run(a: &A, b: &mut B, unknown: A) {
+            a.work(); b.work(); unknown.work();
+            let local: &B = b;
+            local.work();
+            let a = b;
+            a.work();
+        }
+    "#,
+    )]);
+    assert_eq!(
+        calls(&graph, "run"),
+        [
+            "rust:lib.rs::A::work",
+            "rust:lib.rs::B::work",
+            "rust:lib.rs::A::work",
+            "rust:lib.rs::B::work",
+            "?a::work",
+        ]
+    );
+    let a = graph
+        .symbols
+        .keys()
+        .find(|key| key.name() == "A::work")
+        .unwrap();
+    let b = graph
+        .symbols
+        .keys()
+        .find(|key| key.name() == "B::work")
+        .unwrap();
+    assert_eq!(graph.incoming[a].len(), 1);
+    assert_eq!(graph.incoming[b].len(), 1);
+}
+
+#[test]
+fn imported_typed_receiver_resolves_without_guessing_dynamic_trait() {
+    let graph = graph(&[
+        (
+            "src/lib.rs",
+            "mod extra; pub struct S; impl S { pub fn work(&self) {} }",
+        ),
+        (
+            "src/extra.rs",
+            r#"
+            use crate::S as Alias;
+            fn run(value: &Alias, dynamic: &dyn Trait) { value.work(); dynamic.work(); }
+            trait Trait { fn work(&self); }
+        "#,
+        ),
+    ]);
+    let found = calls(&graph, "run");
+    assert_eq!(found[0], "rust:src/lib.rs::S::work");
+    assert_eq!(found[1], "?dynamic::work");
+}
+
+#[test]
+fn typed_receiver_does_not_guess_trait_dispatch_or_generic_parameters() {
+    let graph = graph(&[(
+        "lib.rs",
+        r#"
+        struct S;
+        trait T { fn work(&self); }
+        impl S { fn work(&self) {} }
+        impl T for S { fn work(&self) {} }
+        fn run<T>(s: &S, generic: &T) { s.work(); generic.work(); }
+    "#,
+    )]);
+    assert_eq!(calls(&graph, "run"), ["~s::work", "?generic::work"]);
+    let inherent = graph
+        .symbols
+        .keys()
+        .find(|key| key.name() == "S::work")
+        .unwrap();
+    let trait_impl = graph
+        .symbols
+        .keys()
+        .find(|key| key.name() == "<S as T>::work")
+        .unwrap();
+    assert!(!graph.incoming.contains_key(inherent));
+    assert!(!graph.incoming.contains_key(trait_impl));
+}
+
+#[test]
+fn inner_pattern_binding_blocks_outer_typed_receiver() {
+    let graph = graph(&[(
+        "lib.rs",
+        r#"
+        struct S; impl S { fn work(&self) {} }
+        struct U; impl U { fn work(&self) {} }
+        fn run(s: &S, values: &[U]) {
+            if let Some(s) = values.first() { s.work(); }
+            for s in values { s.work(); }
+            match values.first() { Some(s) => s.work(), None => {} }
+            s.work();
+        }
+    "#,
+    )]);
+    let node = graph
+        .symbols
+        .values()
+        .find(|node| node.symbol.key.name() == "run")
+        .unwrap();
+    let mut leaves = Vec::new();
+    fn visit(steps: &[model::ResolvedStep], leaves: &mut Vec<String>) {
+        for step in steps {
+            match step {
+                model::ResolvedStep::Call(call) => leaves.push(call.resolution.identity()),
+                model::ResolvedStep::Branch { children, .. } => visit(children, leaves),
+            }
+        }
+    }
+    visit(&node.steps, &mut leaves);
+    assert_eq!(
+        leaves
+            .iter()
+            .filter(|leaf| *leaf == "rust:lib.rs::S::work")
+            .count(),
+        1
+    );
+    assert_eq!(leaves.iter().filter(|leaf| *leaf == "?s::work").count(), 3);
+}
+
+#[test]
+fn block_items_shadow_outer_typed_receiver_before_and_after_declaration() {
+    let graph = graph(&[(
+        "lib.rs",
+        r#"
+        struct S; impl S { fn work(&self) {} }
+        struct T; impl T { fn work(&self) {} }
+        fn run(x: &S) {
+            { x.work(); const x: T = T; x.work(); }
+            { static x: T = T; x.work(); }
+        }
+    "#,
+    )]);
+    assert_eq!(calls(&graph, "run"), ["?x::work", "?x::work", "?x::work"]);
+    let s = graph
+        .symbols
+        .keys()
+        .find(|key| key.name() == "S::work")
+        .unwrap();
+    assert!(!graph.incoming.contains_key(s));
+}
+
+#[test]
 fn raw_bindings_still_shadow_functions() {
     let graph = graph(&[(
         "lib.rs",
