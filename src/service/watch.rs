@@ -93,12 +93,35 @@ impl Pending {
                 {
                     continue;
                 }
-                if event.kind.is_remove()
-                    || model::Syntax::for_path(relative).is_none()
-                    || path.is_dir()
+                let source = model::Syntax::for_path(relative).is_some();
+                if path.is_dir()
+                    || matches!(
+                        event.kind,
+                        notify::EventKind::Remove(notify::event::RemoveKind::Folder)
+                            | notify::EventKind::Create(notify::event::CreateKind::Folder)
+                    )
                 {
-                    // Includes removed/renamed directories, whose descendants may be cached.
                     self.recover(None);
+                    continue;
+                }
+                if matches!(
+                    event.kind,
+                    notify::EventKind::Remove(notify::event::RemoveKind::File)
+                ) && !source
+                {
+                    continue;
+                }
+                if event.kind.is_remove()
+                    || matches!(
+                        event.kind,
+                        notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    )
+                {
+                    // Unknown removed/renamed paths can be directories with cached descendants.
+                    self.recover(None);
+                    continue;
+                }
+                if !source {
                     continue;
                 }
                 let Some(relative) = relative.to_str() else {
@@ -140,9 +163,89 @@ pub(super) fn start(root: PathBuf, pending: Arc<Mutex<Pending>>) -> notify::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{Event, EventKind, Flag, ModifyKind};
+    use notify::event::{CreateKind, Event, EventKind, Flag, ModifyKind, RemoveKind, RenameMode};
     use notify_debouncer_full::DebouncedEvent;
     use std::time::Instant;
+
+    #[test]
+    fn non_source_build_output_does_not_request_rescan() {
+        let root = Path::new("/repo");
+        let mut pending = Pending {
+            watching: true,
+            ..Pending::default()
+        };
+        pending.events(
+            root,
+            Ok(vec![DebouncedEvent::new(
+                Event::new(EventKind::Modify(ModifyKind::Any))
+                    .add_path(root.join("target/debug/deps/libfoo.rlib")),
+                Instant::now(),
+            )]),
+        );
+        assert_eq!(pending.take(), None);
+        assert!(!pending.recovery_needed);
+        assert_eq!(pending.epoch(), 0);
+    }
+
+    #[test]
+    fn non_source_file_removal_does_not_request_rescan() {
+        let root = Path::new("/repo");
+        let mut pending = Pending::default();
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            pending.events(
+                root,
+                Ok(vec![DebouncedEvent::new(
+                    Event::new(kind).add_path(root.join("target/debug/libfoo.rlib")),
+                    Instant::now(),
+                )]),
+            );
+        }
+        assert_eq!(pending.take(), None);
+        assert!(!pending.recovery_needed);
+    }
+
+    #[test]
+    fn discovery_changes_still_request_rescan() {
+        let root = Path::new("/repo");
+        for event in [
+            Event::new(EventKind::Remove(RemoveKind::Any)).add_path(root.join("src")),
+            Event::new(EventKind::Remove(RemoveKind::Any))
+                .add_path(root.join("target/debug/libfoo.rlib")),
+            Event::new(EventKind::Remove(RemoveKind::File)).add_path(root.join("src/lib.rs")),
+            Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(root.join("target")),
+            Event::new(EventKind::Create(CreateKind::Folder)).add_path(root.join("src")),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(root.join("target/debug/libfoo.rlib"))
+                .add_path(root.join("src/foo.rs")),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                .add_path(root.join("src")),
+            Event::new(EventKind::Create(CreateKind::File)).add_path(root.join(".gitignore")),
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(".git/config")),
+        ] {
+            let mut pending = Pending::default();
+            pending.events(root, Ok(vec![DebouncedEvent::new(event, Instant::now())]));
+            assert_eq!(pending.take(), Some(None));
+            assert!(pending.recovery_needed);
+        }
+    }
+
+    #[test]
+    fn source_changes_still_invalidate_paths() {
+        let root = Path::new("/repo");
+        let mut pending = Pending::default();
+        pending.events(
+            root,
+            Ok(vec![DebouncedEvent::new(
+                Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("src/lib.rs")),
+                Instant::now(),
+            )]),
+        );
+        assert_eq!(pending.take(), Some(Some(vec!["src/lib.rs".to_owned()])));
+        assert!(!pending.recovery_needed);
+    }
 
     #[test]
     fn overflow_and_events_during_recovery_are_not_lost() {
